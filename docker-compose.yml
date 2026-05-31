@@ -4,7 +4,9 @@ services:
     container_name: air-fry-timing
     restart: unless-stopped
     ports:
-      - "3000:3000"
+      # Host port is configurable so you can avoid clashes with other Umbrel
+      # apps. Override HOST_PORT in .env; container always listens on 3000.
+      - "${HOST_PORT:-3000}:3000"
     environment:
       # Change these before exposing the app. If SESSION_SECRET is unset a random
       # one is generated each start (everyone gets logged out on restart).
