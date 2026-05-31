@@ -1,8 +1,11 @@
-# 🍟 Air Fry Timing
+# 🍟 Get Fried
 
 A searchable, filterable, taggable database of air-fryer timings, with built-in
 step-aware timers. Runs as a PWA (installable on Android/iOS/desktop) backed by a
 small Node + SQLite server in a single Docker container.
+
+> User-facing name is **Get Fried**; the package/folder/volume slug stays
+> `air-fry-timing` (changing it would orphan the existing Docker volume).
 
 ## Status — Phase 1 (MVP)
 
@@ -16,7 +19,9 @@ small Node + SQLite server in a single Docker container.
 
 ### Planned
 
-- **Phase 2:** server-driven Web Push so timers alert when the phone is
+- ✅ **Phase 2a:** deployed on Umbrel via docker-compose (see runbook below).
+- **Phase 2b:** Cloudflare Tunnel + Access for an HTTPS URL (enables PWA install + push).
+- **Phase 2c:** server-driven Web Push so timers alert when the phone is
   backgrounded/locked; PWA offline app-shell; iOS "Add to Home Screen" onboarding.
 - **Phase 3:** ratings/last-cooked sorting, spreadsheet (CSV/XLSX) import, backup/export.
 
@@ -47,6 +52,79 @@ SESSION_SECRET=<long random string>
 
 All data (SQLite DB + photos) lives in the `airfry-data` volume — back it up by
 copying that volume, or point `DATA_DIR` at a host folder.
+
+## Production deployment & update runbook (Umbrel)
+
+The app is hosted on the user's **Umbrel server** (umbrelOS = Debian + Docker),
+deployed as plain docker-compose (not yet a formal Umbrel app). Code is delivered
+via GitHub; data stays on the server.
+
+- **Repo:** `https://github.com/silencer556/get-fried` (public, no secrets — `.env` is gitignored)
+- **On Umbrel:** project lives at `~/get-fried`; reachable at `http://umbrel.local:3000`
+- **Dev machine:** Windows PC at `C:\Users\JC\Documents\Air Fry Timing` (Docker is *not* installed there — local testing uses `npm start`)
+
+### The golden rule
+
+**Edit code only on the Windows dev machine. Treat Umbrel as receive-only**
+(`git pull`, never edit files there) or `git pull` will hit merge conflicts.
+
+### Update loop
+
+On Windows (develop + test with `npm start`, then):
+
+```bash
+git add -A
+git commit -m "describe the change"
+git push
+```
+
+On Umbrel (over SSH — `ssh umbrel@umbrel.local`):
+
+```bash
+cd ~/get-fried
+git pull
+sudo docker compose up -d --build   # --build applies the new code; a plain pull does NOT
+```
+
+### Code vs. data (they flow separately)
+
+- **Code** syncs via git: Windows → GitHub → Umbrel.
+- **Data** (entries/photos) does **not** sync. Umbrel entries live only in the
+  Umbrel `airfry-data` volume; local Windows test entries live only on the PC.
+  So you can hack on dev with throwaway entries without touching production.
+
+### Data persistence
+
+Entries/photos survive: `compose restart`, `compose down` + `up`, image rebuilds
+(`up -d --build`), and Umbrel reboots. The **only** things that wipe data:
+`docker compose down -v` (the `-v` deletes volumes) or deleting the volume manually.
+**Never use `-v`** unless you intend to erase everything.
+
+### Handy ops commands (run on Umbrel with `sudo`)
+
+```bash
+docker compose ps                 # is it Up?
+docker compose logs --tail=50 app # recent logs
+docker compose logs -f app        # follow logs (Ctrl-C to exit)
+docker compose restart            # restart without rebuild
+docker compose up -d --build      # rebuild + restart after a git pull
+docker compose down               # stop & remove container (data SAFE — no -v)
+```
+
+### First-time deploy (already done — for reference)
+
+```bash
+git clone https://github.com/silencer556/get-fried.git
+cd get-fried
+cat > .env <<EOF
+HOST_PORT=3000
+EDITOR_PASSWORD=<strong>
+VIEWER_PASSWORD=<strong>
+SESSION_SECRET=$(openssl rand -hex 32)
+CLOUDFLARE_TUNNEL_TOKEN=
+EOF
+sudo docker compose up -d --build
+```
 
 ## Exposing over HTTPS (for PWA install + background push)
 
