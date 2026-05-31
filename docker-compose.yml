@@ -1,0 +1,29 @@
+services:
+  app:
+    build: .
+    container_name: air-fry-timing
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      # Change these before exposing the app. If SESSION_SECRET is unset a random
+      # one is generated each start (everyone gets logged out on restart).
+      EDITOR_PASSWORD: ${EDITOR_PASSWORD:-editor}
+      VIEWER_PASSWORD: ${VIEWER_PASSWORD:-viewer}
+      SESSION_SECRET: ${SESSION_SECRET:-please-change-me}
+    volumes:
+      - airfry-data:/data   # SQLite DB + uploaded photos
+
+  # Optional: uncomment and add your tunnel token to expose over HTTPS.
+  # cloudflared:
+  #   image: cloudflare/cloudflared:latest
+  #   container_name: air-fry-tunnel
+  #   restart: unless-stopped
+  #   command: tunnel run
+  #   environment:
+  #     TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN}
+  #   depends_on:
+  #     - app
+
+volumes:
+  airfry-data:

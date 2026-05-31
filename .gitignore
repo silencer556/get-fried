@@ -1,0 +1,7 @@
+node_modules
+data
+.env
+*.log
+
+# Claude Code local-only settings
+.claude/settings.local.json

@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#e8590c" />
+  <link rel="manifest" href="/manifest.json" />
+  <link rel="stylesheet" href="/styles.css" />
+  <title>Get Fried</title>
+</head>
+<body>
+  <!-- Login gate -->
+  <div id="login" class="login hidden">
+    <form id="login-form" class="card">
+      <h1>🍟 Get Fried</h1>
+      <p class="muted">Enter your password to continue.</p>
+      <input id="password" type="password" placeholder="Password" autocomplete="current-password" />
+      <button type="submit">Sign in</button>
+      <p id="login-error" class="error"></p>
+    </form>
+  </div>
+
+  <!-- App -->
+  <div id="app" class="hidden">
+    <header>
+      <h1>🍟 Get Fried</h1>
+      <div class="header-actions">
+        <button id="add-btn" class="primary hidden">Add</button>
+        <button id="logout-btn" class="ghost">Sign out</button>
+      </div>
+    </header>
+
+    <div class="filters">
+      <input id="search" type="search" placeholder="Search name, brand, notes, tags…" />
+      <select id="filter-category"><option value="">All categories</option></select>
+      <select id="filter-tag"><option value="">All tags</option></select>
+    </div>
+
+    <main id="list" class="grid"></main>
+    <p id="empty" class="muted hidden">No entries match.</p>
+  </div>
+
+  <!-- Entry editor modal -->
+  <div id="editor" class="modal hidden">
+    <form id="entry-form" class="card modal-card">
+      <h2 id="editor-title">Add entry</h2>
+      <div class="row">
+        <label>Name<input name="name" required /></label>
+        <label>Brand<input name="brand" /></label>
+      </div>
+      <div class="row">
+        <label>Category<input name="category" list="category-list" /></label>
+        <label>Temp<input name="temp" type="number" inputmode="numeric" /></label>
+        <label class="narrow">Unit
+          <select name="temp_unit"><option>F</option><option>C</option></select>
+        </label>
+      </div>
+      <div class="row">
+        <label>Appliance
+          <select name="appliance_id" id="appliance-select"></select>
+        </label>
+        <label>Servings note<input name="servings_note" placeholder="e.g. single layer" /></label>
+      </div>
+      <div class="row">
+        <label class="check"><input name="preheat" type="checkbox" /> Preheat</label>
+        <label>Preheat time (mm:ss)<input name="preheat_time" placeholder="3:00" /></label>
+        <label class="narrow">Rating
+          <select name="rating"><option>0</option><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option></select>
+        </label>
+      </div>
+
+      <fieldset id="steps-fieldset">
+        <legend>Steps</legend>
+        <p class="muted small">One step = just a total time. Add a step to alert for a flip/shake/toss at any point.</p>
+        <div id="steps"></div>
+        <button type="button" id="add-step" class="ghost small">Add step</button>
+      </fieldset>
+
+      <label>Tags <input name="tags" placeholder="comma separated, e.g. fries, frozen" /></label>
+      <label>Notes <textarea name="notes" rows="3"></textarea></label>
+
+      <div class="photo-field">
+        <span class="field-label">Photo</span>
+        <input id="photo-input" type="file" accept="image/*" class="visually-hidden" />
+        <label for="photo-input" class="file-btn" id="photo-btn">Choose photo…</label>
+      </div>
+      <div id="photo-preview" class="photo-preview hidden">
+        <div id="crop-frame" class="crop-frame" title="Drag to reposition"></div>
+        <div class="crop-controls">
+          <span class="muted small">Drag the photo to choose what shows on the card.</span>
+          <div class="crop-buttons">
+            <button type="button" id="crop-reset" class="ghost small">Recenter</button>
+            <button type="button" id="photo-remove" class="ghost small">Remove photo</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="modal-actions">
+        <button type="button" id="cancel-edit" class="ghost">Cancel</button>
+        <button type="submit" class="primary">Save</button>
+      </div>
+      <p id="editor-error" class="error"></p>
+    </form>
+  </div>
+
+  <!-- Pre-start detail / confirmation screen -->
+  <div id="prestart" class="modal hidden">
+    <div class="card modal-card prestart-card">
+      <button id="ps-close" class="ps-close" aria-label="Close">×</button>
+      <div id="ps-photo" class="ps-photo"></div>
+      <h2 id="ps-name"></h2>
+      <div id="ps-meta" class="meta"></div>
+      <div id="ps-flags" class="ps-flags"></div>
+      <ol id="ps-steps" class="ps-steps"></ol>
+      <p id="ps-notes" class="muted small hidden"></p>
+      <div class="modal-actions">
+        <button id="ps-cancel" class="ghost">Cancel</button>
+        <button id="ps-start" class="primary">Start Cook Timer</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Timer overlay -->
+  <div id="timer" class="timer-overlay hidden">
+    <div class="timer-card">
+      <p id="timer-name" class="timer-name"></p>
+      <p id="timer-stage" class="timer-stage"></p>
+      <div id="timer-clock" class="timer-clock">00:00</div>
+      <p id="timer-next" class="muted"></p>
+      <ol id="timer-steps" class="timer-steps"></ol>
+      <div class="timer-actions">
+        <button id="timer-pause" class="primary">Pause</button>
+        <button id="timer-add30" class="ghost">+30s</button>
+        <button id="timer-stop" class="ghost">Stop</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- In-app confirmation dialog -->
+  <div id="confirm-modal" class="modal hidden">
+    <div class="card confirm-card">
+      <p id="confirm-message"></p>
+      <div class="modal-actions">
+        <button id="confirm-cancel" class="ghost">Cancel</button>
+        <button id="confirm-ok" class="primary">OK</button>
+      </div>
+    </div>
+  </div>
+
+  <datalist id="category-list"></datalist>
+  <script src="/app.js" type="module"></script>
+</body>
+</html>

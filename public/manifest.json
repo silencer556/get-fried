@@ -1,0 +1,12 @@
+{
+  "name": "Get Fried",
+  "short_name": "Get Fried",
+  "description": "A searchable database of air-fryer timings with built-in timers.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#1a1a1e",
+  "theme_color": "#e8590c",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
