@@ -132,7 +132,11 @@ app.post("/api/push/unsubscribe", requireUser, (req, res) => {
 app.post("/api/push/test", requireUser, async (req, res) => {
   if (!pushEnabled) return res.status(503).json({ error: "Push not configured on the server." });
   const result = await pushToAll(
-    JSON.stringify({ title: "Get Fried", body: "Test alert — notifications are working." })
+    JSON.stringify({
+      title: "Get Fried",
+      body: "Test alert — notifications are working.",
+      tag: "getfried-test-" + Date.now(), // unique → always re-alerts (sound/vibrate)
+    })
   );
   res.json(result);
 });

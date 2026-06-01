@@ -14,7 +14,7 @@ self.addEventListener("push", (event) => {
     self.registration.showNotification(data.title || "Get Fried", {
       body: data.body || "",
       vibrate: [300, 150, 300, 150, 300],
-      tag: data.tag || "air-fry-timer",
+      tag: data.tag || "air-fry-" + Date.now(), // unique by default → always re-alerts
       renotify: true,
       requireInteraction: true, // stay on screen until dismissed (Android)
     })
