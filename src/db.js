@@ -67,6 +67,13 @@ db.exec(`
     auth       TEXT NOT NULL,
     created_at TEXT DEFAULT (datetime('now'))
   );
+
+  -- Active cook per device, so a running timer survives app close / phone restart.
+  CREATE TABLE IF NOT EXISTS active_cooks (
+    device_id  TEXT PRIMARY KEY,
+    state      TEXT NOT NULL,
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
 `);
 
 // ---- Migrations -----------------------------------------------------------

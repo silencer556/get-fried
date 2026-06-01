@@ -210,6 +210,31 @@ app.post("/api/timer/disarm", requireUser, (req, res) => {
   res.json({ ok: true });
 });
 
+// ---- Active cook persistence (survive app close / phone restart) ----------
+const upsertCook = db.prepare(
+  `INSERT INTO active_cooks (device_id, state, updated_at) VALUES (@device_id, @state, datetime('now'))
+   ON CONFLICT(device_id) DO UPDATE SET state = excluded.state, updated_at = datetime('now')`
+);
+const getCook = db.prepare("SELECT state FROM active_cooks WHERE device_id = ?");
+const delCook = db.prepare("DELETE FROM active_cooks WHERE device_id = ?");
+
+app.put("/api/cook/state", requireUser, (req, res) => {
+  const s = req.body;
+  if (!s?.deviceId) return res.status(400).json({ error: "deviceId required" });
+  upsertCook.run({ device_id: s.deviceId, state: JSON.stringify(s) });
+  res.json({ ok: true });
+});
+
+app.get("/api/cook/state", requireUser, (req, res) => {
+  const row = getCook.get(req.query.deviceId || "");
+  res.json(row ? JSON.parse(row.state) : null);
+});
+
+app.delete("/api/cook/state", requireUser, (req, res) => {
+  delCook.run(req.query.deviceId || "");
+  res.json({ ok: true });
+});
+
 // ---- Helpers --------------------------------------------------------------
 const getTagsForEntry = db.prepare(
   `SELECT t.name FROM tags t

@@ -118,6 +118,7 @@ async function showApp() {
   $("#app").classList.remove("hidden");
   if (state.role === "editor") $("#add-btn").classList.remove("hidden");
   updateAlertsUI();
+  restoreActiveCook(); // re-attach to a cook left running when the app was closed
   state.appliances = await api("/api/appliances");
   await loadFilters();
   await loadEntries();
@@ -681,7 +682,107 @@ function setSegment(seconds) {
   timer.segmentEndsAt = Date.now() + seconds * 1000;
 }
 
+// ---- minimize / floating pill ---------------------------------------------
+function minimizeTimer() {
+  if (!timer) return;
+  timer.minimized = true;
+  $("#timer").classList.add("hidden");
+  $("#cook-pill").classList.remove("hidden");
+  updatePill();
+}
+async function reopenTimer() {
+  if (!timer) return;
+  timer.minimized = false;
+  $("#cook-pill").classList.add("hidden");
+  $("#timer").classList.remove("hidden");
+  try { if (audioCtx?.state === "suspended") await audioCtx.resume(); } catch {}
+  renderTimer();
+}
+function hidePill() {
+  $("#cook-pill").classList.add("hidden");
+}
+function updatePill() {
+  if (!timer || !timer.minimized) return;
+  let label;
+  if (timer.finished) label = "Done!";
+  else if (timer.awaiting) label = ACTION_TEXT[timer.awaiting] || "Check it!";
+  else if (timer.paused) label = "Paused";
+  else label = fmt(timer.remaining);
+  $("#cook-pill").innerHTML =
+    `<span class="pill-name">${esc(timer.spec.name)}</span> <span class="pill-clock">${esc(label)}</span>`;
+  $("#cook-pill").classList.toggle("alerting", !!(timer.awaiting || timer.finished));
+}
+
+// ---- active-cook persistence (survive close / restart) --------------------
+function deviceId() {
+  let id = localStorage.getItem("gf-device");
+  if (!id) {
+    id = crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(36).slice(2);
+    localStorage.setItem("gf-device", id);
+  }
+  return id;
+}
+
+function cookState() {
+  if (!timer) return null;
+  return {
+    deviceId: deviceId(),
+    entryId: timer.spec.id,
+    name: timer.spec.name,
+    phases: timer.spec.phases,
+    stepsHtml: $("#timer-steps").innerHTML,
+    idx: timer.idx,
+    paused: timer.paused,
+    awaiting: timer.awaiting,
+    finished: timer.finished,
+    segmentEndsAt: timer.segmentEndsAt || null,
+    remaining: timer.remaining,
+    savedAt: Date.now(),
+  };
+}
+async function persistCook() {
+  const s = cookState();
+  if (!s) return;
+  try { await api("/api/cook/state", { method: "PUT", body: JSON.stringify(s) }); } catch {}
+}
+async function clearCook() {
+  try {
+    await api("/api/cook/state?deviceId=" + encodeURIComponent(deviceId()), { method: "DELETE" });
+  } catch {}
+}
+
+// On load, re-attach to a cook that was running when the app was closed/restarted.
+async function restoreActiveCook() {
+  if (timer) return;
+  let s;
+  try { s = await api("/api/cook/state?deviceId=" + encodeURIComponent(deviceId())); } catch { return; }
+  if (!s || !s.phases) return;
+  // Drop cooks older than 6h (clearly abandoned).
+  if (s.savedAt && Date.now() - s.savedAt > 6 * 3600 * 1000) { clearCook(); return; }
+
+  timer = {
+    spec: { id: s.entryId, name: s.name, phases: s.phases },
+    idx: s.idx, paused: s.paused, awaiting: s.awaiting, finished: s.finished,
+    wakeLock: null, minimized: true,
+  };
+  if (!s.finished && !s.paused && !s.awaiting && s.segmentEndsAt) {
+    timer.segmentEndsAt = s.segmentEndsAt;
+    timer.remaining = Math.max(0, Math.ceil((s.segmentEndsAt - Date.now()) / 1000));
+  } else {
+    timer.remaining = s.remaining || 0;
+    timer.segmentEndsAt = Date.now() + (s.remaining || 0) * 1000;
+  }
+  $("#timer-name").textContent = s.name;
+  $("#timer-steps").innerHTML = s.stepsHtml || "";
+  timer.interval = setInterval(tick, 1000);
+  $("#cook-pill").classList.remove("hidden"); // restore minimized (non-intrusive)
+  renderTimer();
+  if (!timer.paused && !timer.finished) tick(); // reconcile time elapsed while away
+}
+
 async function startTimer(spec, entry) {
+  if (timer) { clearInterval(timer.interval); stopAlarm(); } // replace any running cook
+  hidePill();
   audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
   if (audioCtx.state === "suspended") await audioCtx.resume();
   let wakeLock = null;
@@ -697,6 +798,7 @@ async function startTimer(spec, entry) {
   renderTimer();
 
   timer.interval = setInterval(tick, 1000);
+  persistCook();
   // Arm the background push. Only speak up if alerts AREN'T set up (a useful nudge).
   armServerAlert().then((armed) => {
     if (!timer) return; // stopped already
@@ -704,6 +806,9 @@ async function startTimer(spec, entry) {
       toast("Tip: tap the ⋮ menu → Enable Alerts for background notifications.");
   });
 }
+
+$("#timer-min").addEventListener("click", minimizeTimer);
+$("#cook-pill").addEventListener("click", reopenTimer);
 
 const currentPhase = () => timer.spec.phases[timer.idx];
 
@@ -725,6 +830,7 @@ function highlightStep() {
 
 function renderTimer() {
   highlightStep();
+  updatePill();
   const pauseBtn = $("#timer-pause");
 
   if (timer.finished) {
@@ -781,6 +887,7 @@ function advancePhase() {
     timer.awaiting = action;
     timer.remaining = 0;
     renderTimer();
+    persistCook();
     return;
   }
   // Seamless ("next") or final ("done"): advance immediately.
@@ -789,10 +896,12 @@ function advancePhase() {
     timer.finished = true;
     timer.paused = true;
     renderTimer();
+    persistCook();
     return; // the armed "Done!" push fires on its own (don't cancel it)
   }
   setSegment(currentPhase().seconds);
   renderTimer();
+  persistCook();
 }
 
 // Ring (and flash) repeatedly every 5s until acknowledged — Resume for an
@@ -845,6 +954,7 @@ $("#timer-pause").addEventListener("click", () => {
     }
   }
   renderTimer();
+  persistCook();
 });
 $("#timer-add30").addEventListener("click", () => {
   if (timer.finished) {
@@ -868,6 +978,7 @@ $("#timer-add30").addEventListener("click", () => {
   }
   renderTimer();
   armServerAlert(); // re-arm with the extended time
+  persistCook();
 });
 $("#timer-stop").addEventListener("click", async () => {
   // Confirm only while actively cooking/holding — on the "Done!" screen, Stop
@@ -886,8 +997,10 @@ async function stopTimer() {
   clearInterval(timer.interval);
   stopAlarm();
   disarmServerAlert(); // cancel any pending background push
+  clearCook(); // remove the persisted active cook
   try { await timer.wakeLock?.release(); } catch {}
   $("#timer").classList.add("hidden");
+  hidePill();
   // Stamp "last cooked" for the entry we just finished.
   if (timer.spec.id) api("/api/entries/" + timer.spec.id + "/cooked", { method: "POST" }).then(loadEntries).catch(() => {});
   timer = null;

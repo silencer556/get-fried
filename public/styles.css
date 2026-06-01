@@ -333,7 +333,18 @@ legend { padding: 0 0.4rem; color: var(--muted); }
   z-index: 30;
   padding: 1rem;
 }
-.timer-card { text-align: center; display: flex; flex-direction: column; gap: 0.8rem; }
+.timer-card { position: relative; text-align: center; display: flex; flex-direction: column; gap: 0.8rem; }
+.timer-min {
+  position: absolute;
+  top: -2.5rem;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 0.85rem;
+  padding: 0.4rem 0.9rem;
+  border-radius: 999px;
+}
 .timer-name { font-size: 1.3rem; margin: 0; }
 .timer-stage { font-size: 1rem; color: var(--accent-2); margin: 0; min-height: 1.2em; }
 .timer-clock {
@@ -366,4 +377,32 @@ legend { padding: 0 0.4rem; color: var(--muted); }
 .timer-overlay.alerting { animation: flash 0.6s steps(1) infinite; }
 @keyframes flash {
   50% { background: var(--accent); }
+}
+
+/* Floating active-cook pill (timer minimized) */
+.cook-pill {
+  position: fixed;
+  left: 50%;
+  bottom: 1rem;
+  transform: translateX(-50%);
+  z-index: 25;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  max-width: min(92vw, 460px);
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 999px;
+  padding: 0.7rem 1.2rem;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  font-size: 0.95rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.cook-pill .pill-clock { font-variant-numeric: tabular-nums; }
+.cook-pill .pill-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cook-pill.alerting { animation: pill-pulse 0.7s steps(1) infinite; }
+@keyframes pill-pulse {
+  50% { background: var(--accent-2); }
 }

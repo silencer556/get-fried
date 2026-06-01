@@ -129,6 +129,7 @@
   <!-- Timer overlay -->
   <div id="timer" class="timer-overlay hidden">
     <div class="timer-card">
+      <button id="timer-min" class="timer-min" aria-label="Minimize">Minimize</button>
       <p id="timer-name" class="timer-name"></p>
       <p id="timer-stage" class="timer-stage"></p>
       <div id="timer-clock" class="timer-clock">00:00</div>
@@ -141,6 +142,9 @@
       </div>
     </div>
   </div>
+
+  <!-- Floating active-cook pill (shown when the timer is minimized) -->
+  <button id="cook-pill" class="cook-pill hidden"></button>
 
   <!-- In-app confirmation dialog -->
   <div id="confirm-modal" class="modal hidden">
