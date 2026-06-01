@@ -81,6 +81,7 @@ async function pushToAll(payload) {
   const subs = allSubs.all();
   let sent = 0,
     pruned = 0;
+  const errors = [];
   await Promise.all(
     subs.map(async (s) => {
       try {
@@ -93,11 +94,16 @@ async function pushToAll(payload) {
         if (err.statusCode === 404 || err.statusCode === 410) {
           deleteSub.run(s.endpoint);
           pruned++;
+        } else {
+          errors.push({
+            statusCode: err.statusCode || null,
+            body: (err.body || err.message || "").toString().slice(0, 200),
+          });
         }
       }
     })
   );
-  return { total: subs.length, sent, pruned };
+  return { total: subs.length, sent, pruned, errors };
 }
 
 // Only logged-in users (editor or viewer) may register/test push.

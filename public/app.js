@@ -773,7 +773,8 @@ async function initPush() {
 
 // Ask permission (if needed), subscribe via PushManager, send to server.
 async function subscribePush() {
-  if (!pushSupported || !swReg) throw new Error("unsupported");
+  if (!pushSupported) throw new Error("unsupported");
+  swReg = await navigator.serviceWorker.ready; // ensure an ACTIVE worker before subscribing
   const { enabled, publicKey } = await api("/api/push/key");
   if (!enabled || !publicKey) throw new Error("Push not configured on the server.");
   if (Notification.permission !== "granted") {
@@ -812,7 +813,16 @@ async function onAlertsClick() {
       toast("Alerts enabled. Sending a test…");
     }
     const r = await api("/api/push/test", { method: "POST" });
-    toast(r.sent ? "Test alert sent — check your notifications." : "No active subscription. Try Enable Alerts again.");
+    if (r.sent) {
+      toast("Test alert sent — check your notifications.");
+    } else if (r.errors?.length) {
+      const e = r.errors[0];
+      toast(`Push failed (${e.statusCode || "?"}): ${e.body || "see server logs"}`);
+    } else if (r.total === 0) {
+      toast("No subscription on server. Tap Enable Alerts again.");
+    } else {
+      toast("Push not delivered. Check server logs.");
+    }
   } catch (e) {
     toast(e.message || "Couldn't enable alerts.");
   }
