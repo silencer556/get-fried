@@ -108,6 +108,8 @@ $("#login-form").addEventListener("submit", async (e) => {
 });
 
 $("#logout-btn").addEventListener("click", async () => {
+  closeAllMenus();
+  if (!(await confirmDialog("Sign out?", { okLabel: "Sign out" }))) return;
   await api("/api/logout", { method: "POST" });
   location.reload();
 });
@@ -193,10 +195,19 @@ function renderList(entries) {
 }
 
 function closeAllMenus() {
-  document.querySelectorAll("#list .menu").forEach((m) => m.classList.add("hidden"));
+  document.querySelectorAll(".menu").forEach((m) => m.classList.add("hidden"));
 }
 // Click anywhere else closes any open kebab menu (kebab clicks stopPropagation).
 document.addEventListener("click", closeAllMenus);
+
+// Header kebab (holds Alerts + Sign out).
+$("#header-kebab")?.addEventListener("click", (ev) => {
+  ev.stopPropagation();
+  const m = $("#header-menu");
+  const wasOpen = !m.classList.contains("hidden");
+  closeAllMenus();
+  if (!wasOpen) m.classList.remove("hidden");
+});
 
 function card(e) {
   const total = e.total_time_seconds;
@@ -479,9 +490,9 @@ function breakdownItems(entry) {
     let act = "";
     if (["flip", "shake", "toss", "custom"].includes(s.end_action)) {
       const word = s.end_action === "custom" ? s.action_note || "Check it" : ACTION_TEXT[s.end_action];
-      act = ` → <b>${esc(word)}</b>`;
+      act = ` <span class="arr">→</span> <b>${esc(word)}</b>`;
     } else if (i === steps.length - 1) {
-      act = ` → <b>Done</b>`;
+      act = ` <span class="arr">→</span> <b>Done</b>`;
     }
     items.push(`Cook <b>${fmt(s.duration_seconds)}</b>${temp}${act}`);
   });
@@ -529,7 +540,7 @@ function openPrestart(entry) {
   const stepItems = breakdownItems(entry).map((h) => `<li>${h}</li>`);
   if (!hasPreheat) {
     const tempPart = entry.temp ? `set to <b>${entry.temp}°${entry.temp_unit}</b>, ` : "";
-    stepItems.unshift(`<li>Add food, ${tempPart}then press Start Cook Timer</li>`);
+    stepItems.unshift(`<li>Add food, ${tempPart}then press Start</li>`);
   }
   $("#ps-steps").innerHTML = stepItems.join("");
 
@@ -547,6 +558,10 @@ function closePrestart() {
 
 $("#ps-cancel").addEventListener("click", closePrestart);
 $("#ps-close").addEventListener("click", closePrestart);
+// Tap the backdrop (outside the card) to dismiss, same as Cancel.
+$("#prestart").addEventListener("click", (e) => {
+  if (e.target === e.currentTarget) closePrestart();
+});
 $("#ps-start").addEventListener("click", () => {
   const spec = prestartSpec, entry = prestartEntry;
   closePrestart();
@@ -787,9 +802,18 @@ $("#timer-pause").addEventListener("click", () => {
   syncServerAlert();
 });
 $("#timer-add30").addEventListener("click", () => {
-  if (timer.finished) return;
-  timer.remaining += 30;
-  timer.segmentEndsAt += 30000;
+  if (timer.finished) {
+    // Restart the final step for 30 more seconds (keeps cooking past "Done!").
+    timer.finished = false;
+    timer.paused = false;
+    timer.awaiting = null;
+    timer.idx = timer.spec.phases.length - 1;
+    stopAlarm();
+    setSegment(30);
+  } else {
+    timer.remaining += 30;
+    timer.segmentEndsAt += 30000;
+  }
   renderTimer();
   syncServerAlert(); // re-arm with the extended time
 });

@@ -12,7 +12,7 @@
   <!-- Login gate -->
   <div id="login" class="login hidden">
     <form id="login-form" class="card">
-      <h1>🍟 Get Fried</h1>
+      <h1><img src="/icon.svg" class="logo" alt="" /> Get Fried</h1>
       <p class="muted">Enter your password to continue.</p>
       <input id="password" type="password" placeholder="Password" autocomplete="current-password" />
       <button type="submit">Sign in</button>
@@ -23,11 +23,16 @@
   <!-- App -->
   <div id="app" class="hidden">
     <header>
-      <h1>🍟 Get Fried</h1>
+      <h1><img src="/icon.svg" class="logo" alt="" /> Get Fried</h1>
       <div class="header-actions">
-        <button id="alerts-btn" class="ghost hidden">Enable Alerts</button>
         <button id="add-btn" class="primary hidden">Add</button>
-        <button id="logout-btn" class="ghost">Sign out</button>
+        <div class="menu-wrap">
+          <button id="header-kebab" class="ghost kebab" aria-label="Menu" title="Menu">⋮</button>
+          <div id="header-menu" class="menu menu-down hidden">
+            <button id="alerts-btn">Enable Alerts</button>
+            <button id="logout-btn">Sign out</button>
+          </div>
+        </div>
       </div>
     </header>
 
