@@ -697,11 +697,10 @@ async function startTimer(spec, entry) {
   renderTimer();
 
   timer.interval = setInterval(tick, 1000);
-  // Arm the background push and tell the user whether alerts will reach them.
+  // Arm the background push. Only speak up if alerts AREN'T set up (a useful nudge).
   armServerAlert().then((armed) => {
     if (!timer) return; // stopped already
-    if (armed) toast("Background alerts on for this cook.");
-    else if (pushSupported && Notification.permission !== "granted")
+    if (!armed && pushSupported && Notification.permission !== "granted")
       toast("Tip: tap the ⋮ menu → Enable Alerts for background notifications.");
   });
 }
@@ -774,6 +773,17 @@ function tick() {
 function advancePhase() {
   const action = currentPhase().action;
   startAlarm(action);
+  // Interactive holds (flip/shake/toss/custom/preheat): STAY on the current step
+  // until the user resumes — so the step highlight doesn't jump ahead and +30
+  // re-cooks THIS step, not the next one. idx advances on Resume.
+  if (["flip", "shake", "toss", "custom", "preheat-done"].includes(action)) {
+    timer.paused = true;
+    timer.awaiting = action;
+    timer.remaining = 0;
+    renderTimer();
+    return;
+  }
+  // Seamless ("next") or final ("done"): advance immediately.
   timer.idx += 1;
   if (timer.idx >= timer.spec.phases.length) {
     timer.finished = true;
@@ -782,13 +792,7 @@ function advancePhase() {
     return; // the armed "Done!" push fires on its own (don't cancel it)
   }
   setSegment(currentPhase().seconds);
-  if (["flip", "shake", "toss", "custom", "preheat-done"].includes(action)) {
-    timer.paused = true;
-    timer.awaiting = action;
-  }
   renderTimer();
-  // Note: don't arm here. The just-ended segment's push fires on its own; the
-  // next segment is armed when the user resumes (every alert is a hold or final).
 }
 
 // Ring (and flash) repeatedly every 5s until acknowledged — Resume for an
@@ -818,10 +822,18 @@ function stopAlarm() {
 $("#timer-pause").addEventListener("click", () => {
   if (timer.finished) return;
   if (timer.awaiting) {
+    // Acknowledge the hold and NOW advance to the next step.
     timer.awaiting = null;
     timer.paused = false;
-    setSegment(timer.remaining); // restart wall-clock for the resumed segment
     stopAlarm();
+    timer.idx += 1;
+    if (timer.idx >= timer.spec.phases.length) {
+      timer.finished = true;
+      timer.paused = true;
+      renderTimer();
+      return; // (guard; holds are never the last phase in practice)
+    }
+    setSegment(currentPhase().seconds);
     armServerAlert(); // arm the next alert now that we're running again
   } else {
     timer.paused = !timer.paused;
@@ -841,6 +853,13 @@ $("#timer-add30").addEventListener("click", () => {
     timer.paused = false;
     timer.awaiting = null;
     timer.idx = timer.spec.phases.length - 1;
+    stopAlarm();
+    setSegment(30);
+  } else if (timer.awaiting) {
+    // "This step needs a bit more" — re-cook the CURRENT step for 30s; it'll
+    // re-alert (flip/shake/etc) again when those 30s are up.
+    timer.awaiting = null;
+    timer.paused = false;
     stopAlarm();
     setSegment(30);
   } else {

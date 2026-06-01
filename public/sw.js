@@ -13,6 +13,8 @@ self.addEventListener("push", (event) => {
   event.waitUntil(
     self.registration.showNotification(data.title || "Get Fried", {
       body: data.body || "",
+      icon: "/icon.svg", // app icon instead of Android's generated letter avatar
+      badge: "/icon.svg",
       vibrate: [300, 150, 300, 150, 300],
       tag: data.tag || "air-fry-" + Date.now(), // unique by default → always re-alerts
       renotify: true,
