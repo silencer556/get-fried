@@ -585,6 +585,65 @@ const ACTION_TEXT = {
   done: "Done!",
 };
 
+// ---- background push alerts (server-armed) --------------------------------
+// The server fires a single pending push per device when a countdown segment
+// ends WHILE the app is backgrounded/closed. When foreground, the in-app alarm
+// fires first and we disarm, so a grace offset prevents a duplicate push.
+const ALERT_GRACE_S = 3;
+
+// From the current phase, sum time until the next end that actually alerts —
+// skipping seamless "next" transitions (e.g. a mid-cook temp bump). Returns the
+// seconds-from-now and the action, or null if nothing left alerts.
+function nextAlert() {
+  if (!timer) return null;
+  let i = timer.idx;
+  let secs = timer.remaining;
+  while (i < timer.spec.phases.length) {
+    const action = timer.spec.phases[i].action;
+    if (action !== "next") return { fireInSeconds: secs, action };
+    i += 1;
+    if (i < timer.spec.phases.length) secs += timer.spec.phases[i].seconds;
+  }
+  return null;
+}
+
+async function armServerAlert() {
+  if (!pushEndpoint || !timer) return;
+  const next = nextAlert();
+  if (!next) return disarmServerAlert();
+  try {
+    await api("/api/timer/arm", {
+      method: "POST",
+      body: JSON.stringify({
+        endpoint: pushEndpoint,
+        fireInSeconds: Math.max(1, next.fireInSeconds + ALERT_GRACE_S),
+        title: timer.spec.name,
+        body: ACTION_TEXT[next.action] || "Check it!",
+      }),
+    });
+  } catch {}
+}
+
+async function disarmServerAlert() {
+  if (!pushEndpoint) return;
+  try {
+    await api("/api/timer/disarm", { method: "POST", body: JSON.stringify({ endpoint: pushEndpoint }) });
+  } catch {}
+}
+
+// Arm when a countdown is actively running; disarm when paused/held/finished.
+function syncServerAlert() {
+  if (!timer || timer.finished || timer.paused || timer.awaiting) disarmServerAlert();
+  else armServerAlert();
+}
+
+// Set the current running segment's length and its wall-clock end (so the
+// countdown stays accurate across backgrounding/throttling).
+function setSegment(seconds) {
+  timer.remaining = seconds;
+  timer.segmentEndsAt = Date.now() + seconds * 1000;
+}
+
 async function startTimer(spec, entry) {
   audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
   if (audioCtx.state === "suspended") await audioCtx.resume();
@@ -592,6 +651,7 @@ async function startTimer(spec, entry) {
   try { wakeLock = await navigator.wakeLock?.request("screen"); } catch {}
 
   timer = { spec, idx: 0, remaining: spec.phases[0]?.seconds || 0, paused: false, awaiting: null, finished: false, wakeLock };
+  setSegment(timer.remaining);
   $("#timer-steps").innerHTML = entry
     ? breakdownItems(entry).map((h, i) => `<li data-phase="${i}">${h}</li>`).join("")
     : "";
@@ -600,6 +660,7 @@ async function startTimer(spec, entry) {
   renderTimer();
 
   timer.interval = setInterval(tick, 1000);
+  syncServerAlert();
 }
 
 const currentPhase = () => timer.spec.phases[timer.idx];
@@ -656,9 +717,12 @@ function renderTimer() {
 
 function tick() {
   if (timer.paused || timer.finished) return;
-  timer.remaining -= 1;
-  if (timer.remaining <= 0) advancePhase();
-  else renderTimer();
+  // Wall-clock based so a backgrounded/throttled tab stays accurate on return.
+  timer.remaining = Math.ceil((timer.segmentEndsAt - Date.now()) / 1000);
+  if (timer.remaining <= 0) {
+    timer.remaining = 0;
+    advancePhase();
+  } else renderTimer();
 }
 
 // Fire the end-of-phase alert, then advance. Interactive actions
@@ -672,14 +736,16 @@ function advancePhase() {
     timer.finished = true;
     timer.paused = true;
     renderTimer();
+    syncServerAlert(); // finished → disarm (the in-app "Done!" alarm handled it)
     return;
   }
-  timer.remaining = currentPhase().seconds;
+  setSegment(currentPhase().seconds);
   if (["flip", "shake", "toss", "custom", "preheat-done"].includes(action)) {
     timer.paused = true;
     timer.awaiting = action;
   }
   renderTimer();
+  syncServerAlert(); // arm the next real alert, or disarm if now holding
 }
 
 // Ring (and flash) repeatedly every 5s until acknowledged — Resume for an
@@ -711,16 +777,21 @@ $("#timer-pause").addEventListener("click", () => {
   if (timer.awaiting) {
     timer.awaiting = null;
     timer.paused = false;
+    setSegment(timer.remaining); // restart wall-clock for the resumed segment
     stopAlarm();
   } else {
     timer.paused = !timer.paused;
+    if (!timer.paused) setSegment(timer.remaining);
   }
   renderTimer();
+  syncServerAlert();
 });
 $("#timer-add30").addEventListener("click", () => {
   if (timer.finished) return;
   timer.remaining += 30;
+  timer.segmentEndsAt += 30000;
   renderTimer();
+  syncServerAlert(); // re-arm with the extended time
 });
 $("#timer-stop").addEventListener("click", async () => {
   // Confirm only while actively cooking/holding — on the "Done!" screen, Stop
@@ -738,6 +809,7 @@ $("#timer-stop").addEventListener("click", async () => {
 async function stopTimer() {
   clearInterval(timer.interval);
   stopAlarm();
+  disarmServerAlert(); // cancel any pending background push
   try { await timer.wakeLock?.release(); } catch {}
   $("#timer").classList.add("hidden");
   // Stamp "last cooked" for the entry we just finished.
@@ -745,8 +817,15 @@ async function stopTimer() {
   timer = null;
 }
 
+// Returning to a backgrounded app: recompute the countdown immediately so the
+// display reflects reality (and advances/finishes if time elapsed while away).
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && timer && !timer.paused && !timer.finished) tick();
+});
+
 // ---- Push notifications ---------------------------------------------------
 let swReg = null;
+let pushEndpoint = null; // this device's subscription endpoint (target for timer pushes)
 const pushSupported = "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
 
 function urlBase64ToUint8Array(base64) {
@@ -788,6 +867,7 @@ async function subscribePush() {
       applicationServerKey: urlBase64ToUint8Array(publicKey),
     }));
   await api("/api/push/subscribe", { method: "POST", body: JSON.stringify(sub.toJSON()) });
+  pushEndpoint = sub.endpoint; // enables server-armed timer alerts for this device
   return sub;
 }
 

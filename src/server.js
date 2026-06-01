@@ -74,6 +74,25 @@ const insertSub = db.prepare(
 );
 const deleteSub = db.prepare("DELETE FROM push_subscriptions WHERE endpoint = ?");
 const allSubs = db.prepare("SELECT endpoint, p256dh, auth FROM push_subscriptions");
+const getSubByEndpoint = db.prepare(
+  "SELECT endpoint, p256dh, auth FROM push_subscriptions WHERE endpoint = ?"
+);
+
+// Send to a single subscription by endpoint; prune if the push service dropped it.
+async function pushToOne(endpoint, payload) {
+  const s = getSubByEndpoint.get(endpoint);
+  if (!s) return false;
+  try {
+    await webpush.sendNotification(
+      { endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } },
+      payload
+    );
+    return true;
+  } catch (err) {
+    if (err.statusCode === 404 || err.statusCode === 410) deleteSub.run(endpoint);
+    return false;
+  }
+}
 
 // Send a payload to every stored subscription; prune ones the push service has
 // dropped (404/410). Returns counts so callers can report status.
@@ -139,6 +158,50 @@ app.post("/api/push/test", requireUser, async (req, res) => {
     })
   );
   res.json(result);
+});
+
+// ---- Background timer alerts ----------------------------------------------
+// The client arms ONE pending push per device when a countdown segment starts,
+// and disarms it when the segment ends in the foreground. If the app is
+// backgrounded/closed the disarm never comes, so this fires the alert. In-memory
+// only: a server restart drops pending alerts (rare; the user can re-run).
+const armedAlerts = new Map(); // endpoint -> setTimeout handle
+const MAX_ARM_SECONDS = 6 * 60 * 60;
+
+function clearArmed(endpoint) {
+  const h = armedAlerts.get(endpoint);
+  if (h) {
+    clearTimeout(h);
+    armedAlerts.delete(endpoint);
+  }
+}
+
+app.post("/api/timer/arm", requireUser, (req, res) => {
+  const { endpoint, fireInSeconds, title, body } = req.body || {};
+  if (!pushEnabled) return res.status(503).json({ error: "Push not configured." });
+  if (!endpoint || !(Number(fireInSeconds) > 0))
+    return res.status(400).json({ error: "Bad arm request." });
+  const secs = Math.min(Number(fireInSeconds), MAX_ARM_SECONDS);
+  clearArmed(endpoint);
+  const handle = setTimeout(() => {
+    armedAlerts.delete(endpoint);
+    pushToOne(
+      endpoint,
+      JSON.stringify({
+        title: title || "Get Fried",
+        body: body || "Timer",
+        tag: "getfried-timer-" + Date.now(),
+      })
+    );
+  }, secs * 1000);
+  handle.unref?.();
+  armedAlerts.set(endpoint, handle);
+  res.json({ ok: true, fireInSeconds: secs });
+});
+
+app.post("/api/timer/disarm", requireUser, (req, res) => {
+  if (req.body?.endpoint) clearArmed(req.body.endpoint);
+  res.json({ ok: true });
 });
 
 // ---- Helpers --------------------------------------------------------------
