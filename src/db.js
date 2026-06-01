@@ -58,6 +58,15 @@ db.exec(`
     tag_id   INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
     PRIMARY KEY (entry_id, tag_id)
   );
+
+  -- Web Push subscriptions (one row per browser/device that opted in).
+  CREATE TABLE IF NOT EXISTS push_subscriptions (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    endpoint   TEXT NOT NULL UNIQUE,
+    p256dh     TEXT NOT NULL,
+    auth       TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
 `);
 
 // ---- Migrations -----------------------------------------------------------

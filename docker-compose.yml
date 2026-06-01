@@ -13,6 +13,10 @@ services:
       EDITOR_PASSWORD: ${EDITOR_PASSWORD:-editor}
       VIEWER_PASSWORD: ${VIEWER_PASSWORD:-viewer}
       SESSION_SECRET: ${SESSION_SECRET:-please-change-me}
+      # Web Push (Phase 2c). Generate once with `npx web-push generate-vapid-keys`.
+      VAPID_PUBLIC_KEY: ${VAPID_PUBLIC_KEY:-}
+      VAPID_PRIVATE_KEY: ${VAPID_PRIVATE_KEY:-}
+      VAPID_SUBJECT: ${VAPID_SUBJECT:-mailto:admin@getfried.local}
     volumes:
       - airfry-data:/data   # SQLite DB + uploaded photos
 

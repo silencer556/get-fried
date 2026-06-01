@@ -42,6 +42,22 @@ const parseMMSS = (str) => {
 
 const state = { role: null, appliances: [], editing: null };
 
+// Brief auto-dismissing status message at the bottom of the screen.
+let toastTimer = null;
+function toast(message) {
+  let el = $("#toast");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "toast";
+    el.className = "toast hidden";
+    document.body.appendChild(el);
+  }
+  el.textContent = message;
+  el.classList.remove("hidden");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.add("hidden"), 3500);
+}
+
 // In-app replacement for window.confirm(); resolves true/false.
 function confirmDialog(message, { okLabel = "OK", danger = false } = {}) {
   return new Promise((resolve) => {
@@ -99,6 +115,7 @@ $("#logout-btn").addEventListener("click", async () => {
 async function showApp() {
   $("#app").classList.remove("hidden");
   if (state.role === "editor") $("#add-btn").classList.remove("hidden");
+  updateAlertsUI();
   state.appliances = await api("/api/appliances");
   await loadFilters();
   await loadEntries();
@@ -728,9 +745,80 @@ async function stopTimer() {
   timer = null;
 }
 
-// Register service worker (PWA shell). Push wiring lands in Phase 2.
-if ("serviceWorker" in navigator) {
-  navigator.serviceWorker.register("/sw.js").catch(() => {});
+// ---- Push notifications ---------------------------------------------------
+let swReg = null;
+const pushSupported = "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+
+function urlBase64ToUint8Array(base64) {
+  const padding = "=".repeat((4 - (base64.length % 4)) % 4);
+  const b64 = (base64 + padding).replace(/-/g, "+").replace(/_/g, "/");
+  const raw = atob(b64);
+  return Uint8Array.from([...raw].map((c) => c.charCodeAt(0)));
 }
 
+// Register the SW and, if the user already granted permission, refresh the
+// server-side subscription so it stays current.
+async function initPush() {
+  if (!("serviceWorker" in navigator)) return;
+  try {
+    swReg = await navigator.serviceWorker.register("/sw.js");
+  } catch {
+    return;
+  }
+  if (pushSupported && Notification.permission === "granted") {
+    await subscribePush().catch(() => {});
+  }
+  updateAlertsUI();
+}
+
+// Ask permission (if needed), subscribe via PushManager, send to server.
+async function subscribePush() {
+  if (!pushSupported || !swReg) throw new Error("unsupported");
+  const { enabled, publicKey } = await api("/api/push/key");
+  if (!enabled || !publicKey) throw new Error("Push not configured on the server.");
+  if (Notification.permission !== "granted") {
+    const perm = await Notification.requestPermission();
+    if (perm !== "granted") throw new Error("Notification permission denied.");
+  }
+  const sub =
+    (await swReg.pushManager.getSubscription()) ||
+    (await swReg.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: urlBase64ToUint8Array(publicKey),
+    }));
+  await api("/api/push/subscribe", { method: "POST", body: JSON.stringify(sub.toJSON()) });
+  return sub;
+}
+
+function updateAlertsUI() {
+  const btn = $("#alerts-btn");
+  if (!btn) return;
+  if (!pushSupported) {
+    btn.classList.add("hidden");
+    return;
+  }
+  btn.classList.remove("hidden");
+  const granted = Notification.permission === "granted";
+  btn.textContent = granted ? "Test Alert" : "Enable Alerts";
+  btn.dataset.state = granted ? "ready" : "enable";
+}
+
+async function onAlertsClick() {
+  const btn = $("#alerts-btn");
+  try {
+    if (btn.dataset.state !== "ready") {
+      await subscribePush();
+      updateAlertsUI();
+      toast("Alerts enabled. Sending a test…");
+    }
+    const r = await api("/api/push/test", { method: "POST" });
+    toast(r.sent ? "Test alert sent — check your notifications." : "No active subscription. Try Enable Alerts again.");
+  } catch (e) {
+    toast(e.message || "Couldn't enable alerts.");
+  }
+}
+
+$("#alerts-btn")?.addEventListener("click", onAlertsClick);
+
+initPush();
 init();

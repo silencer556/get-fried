@@ -1,6 +1,8 @@
+import "./env.js"; // must be first: loads .env before db.js/auth.js read process.env
 import express from "express";
 import cookieParser from "cookie-parser";
 import multer from "multer";
+import webpush from "web-push";
 import path from "node:path";
 import fs from "node:fs";
 import crypto from "node:crypto";
@@ -57,6 +59,77 @@ app.post("/api/logout", (_req, res) => {
 });
 
 app.get("/api/me", (req, res) => res.json({ role: req.role }));
+
+// ---- Web Push -------------------------------------------------------------
+const VAPID_PUBLIC = process.env.VAPID_PUBLIC_KEY || "";
+const VAPID_PRIVATE = process.env.VAPID_PRIVATE_KEY || "";
+const VAPID_SUBJECT = process.env.VAPID_SUBJECT || "mailto:admin@getfried.local";
+const pushEnabled = Boolean(VAPID_PUBLIC && VAPID_PRIVATE);
+if (pushEnabled) webpush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC, VAPID_PRIVATE);
+else console.warn("Web Push disabled: set VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY to enable.");
+
+const insertSub = db.prepare(
+  `INSERT INTO push_subscriptions (endpoint, p256dh, auth) VALUES (@endpoint, @p256dh, @auth)
+   ON CONFLICT(endpoint) DO UPDATE SET p256dh = excluded.p256dh, auth = excluded.auth`
+);
+const deleteSub = db.prepare("DELETE FROM push_subscriptions WHERE endpoint = ?");
+const allSubs = db.prepare("SELECT endpoint, p256dh, auth FROM push_subscriptions");
+
+// Send a payload to every stored subscription; prune ones the push service has
+// dropped (404/410). Returns counts so callers can report status.
+async function pushToAll(payload) {
+  const subs = allSubs.all();
+  let sent = 0,
+    pruned = 0;
+  await Promise.all(
+    subs.map(async (s) => {
+      try {
+        await webpush.sendNotification(
+          { endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } },
+          payload
+        );
+        sent++;
+      } catch (err) {
+        if (err.statusCode === 404 || err.statusCode === 410) {
+          deleteSub.run(s.endpoint);
+          pruned++;
+        }
+      }
+    })
+  );
+  return { total: subs.length, sent, pruned };
+}
+
+// Only logged-in users (editor or viewer) may register/test push.
+function requireUser(req, res, next) {
+  if (req.role) return next();
+  res.status(401).json({ error: "Login required." });
+}
+
+app.get("/api/push/key", (req, res) =>
+  res.json({ enabled: pushEnabled, publicKey: VAPID_PUBLIC || null })
+);
+
+app.post("/api/push/subscribe", requireUser, (req, res) => {
+  const s = req.body || {};
+  if (!s.endpoint || !s.keys?.p256dh || !s.keys?.auth)
+    return res.status(400).json({ error: "Invalid subscription." });
+  insertSub.run({ endpoint: s.endpoint, p256dh: s.keys.p256dh, auth: s.keys.auth });
+  res.json({ ok: true });
+});
+
+app.post("/api/push/unsubscribe", requireUser, (req, res) => {
+  if (req.body?.endpoint) deleteSub.run(req.body.endpoint);
+  res.json({ ok: true });
+});
+
+app.post("/api/push/test", requireUser, async (req, res) => {
+  if (!pushEnabled) return res.status(503).json({ error: "Push not configured on the server." });
+  const result = await pushToAll(
+    JSON.stringify({ title: "Get Fried", body: "Test alert — notifications are working." })
+  );
+  res.json(result);
+});
 
 // ---- Helpers --------------------------------------------------------------
 const getTagsForEntry = db.prepare(
