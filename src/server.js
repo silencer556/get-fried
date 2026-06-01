@@ -437,8 +437,30 @@ app.post("/api/entries/:id/cooked", (req, res) => {
 });
 
 // ---- Static PWA -----------------------------------------------------------
-app.use(express.static(path.join(__dirname, "..", "public")));
+const PUBLIC_DIR = path.join(__dirname, "..", "public");
+
+// Per-build token (changes every deploy/restart) injected into index.html so
+// Cloudflare/browser caches can't pin a stale app.js or styles.css. index.html
+// itself is served no-store, so the fresh token always reaches the client.
+const BUILD_ID = Date.now().toString(36);
+const INDEX_HTML = fs
+  .readFileSync(path.join(PUBLIC_DIR, "index.html"), "utf8")
+  .replaceAll("__BUILD__", BUILD_ID);
+function serveIndex(_req, res) {
+  res.set("Cache-Control", "no-store");
+  res.type("html").send(INDEX_HTML);
+}
+app.get("/", serveIndex);
+app.get("/index.html", serveIndex);
+
+// The service worker must always be revalidated so SW updates aren't pinned.
+app.get("/sw.js", (_req, res) => {
+  res.set("Cache-Control", "no-cache");
+  res.type("application/javascript").send(fs.readFileSync(path.join(PUBLIC_DIR, "sw.js")));
+});
+
+app.use(express.static(PUBLIC_DIR));
 
 app.listen(PORT, () => {
-  console.log(`Air Fry Timing running on http://localhost:${PORT}`);
+  console.log(`Get Fried running on http://localhost:${PORT} (build ${BUILD_ID})`);
 });
