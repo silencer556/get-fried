@@ -183,9 +183,11 @@ app.post("/api/timer/arm", requireUser, (req, res) => {
     return res.status(400).json({ error: "Bad arm request." });
   const secs = Math.min(Number(fireInSeconds), MAX_ARM_SECONDS);
   clearArmed(endpoint);
-  const handle = setTimeout(() => {
+  const tail = endpoint.slice(-12);
+  console.log(`[timer] armed ${tail} in ${secs}s — "${body}"`);
+  const handle = setTimeout(async () => {
     armedAlerts.delete(endpoint);
-    pushToOne(
+    const ok = await pushToOne(
       endpoint,
       JSON.stringify({
         title: title || "Get Fried",
@@ -193,6 +195,7 @@ app.post("/api/timer/arm", requireUser, (req, res) => {
         tag: "getfried-timer-" + Date.now(),
       })
     );
+    console.log(`[timer] fired ${tail} — "${body}" — delivered=${ok}`);
   }, secs * 1000);
   handle.unref?.();
   armedAlerts.set(endpoint, handle);
@@ -200,7 +203,10 @@ app.post("/api/timer/arm", requireUser, (req, res) => {
 });
 
 app.post("/api/timer/disarm", requireUser, (req, res) => {
-  if (req.body?.endpoint) clearArmed(req.body.endpoint);
+  if (req.body?.endpoint) {
+    clearArmed(req.body.endpoint);
+    console.log(`[timer] disarmed ${req.body.endpoint.slice(-12)}`);
+  }
   res.json({ ok: true });
 });
 

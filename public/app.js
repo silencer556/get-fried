@@ -601,10 +601,28 @@ const ACTION_TEXT = {
 };
 
 // ---- background push alerts (server-armed) --------------------------------
-// The server fires a single pending push per device when a countdown segment
-// ends WHILE the app is backgrounded/closed. When foreground, the in-app alarm
-// fires first and we disarm, so a grace offset prevents a duplicate push.
-const ALERT_GRACE_S = 3;
+// The server fires the alert push at a segment's end so it lands even when the
+// app is backgrounded/locked/closed. The push ALWAYS fires (no foreground
+// suppression) — when foreground you also get the in-app alarm, which is fine.
+// We re-arm at each segment start; alerts are always followed by a hold or are
+// the final "done", so a new arm never cancels an about-to-fire one.
+
+// Make sure we have this device's subscription endpoint (needed to target the
+// push). Falls back to reading the existing subscription if it wasn't cached.
+async function ensurePushEndpoint() {
+  if (pushEndpoint) return pushEndpoint;
+  if (!pushSupported || Notification.permission !== "granted") return null;
+  try {
+    const reg = await navigator.serviceWorker.ready;
+    const sub = await reg.pushManager.getSubscription();
+    if (sub) {
+      pushEndpoint = sub.endpoint;
+      // make sure the server knows this subscription
+      await api("/api/push/subscribe", { method: "POST", body: JSON.stringify(sub.toJSON()) }).catch(() => {});
+    }
+  } catch {}
+  return pushEndpoint;
+}
 
 // From the current phase, sum time until the next end that actually alerts —
 // skipping seamless "next" transitions (e.g. a mid-cook temp bump). Returns the
@@ -622,21 +640,31 @@ function nextAlert() {
   return null;
 }
 
+// Arm the server push for the current segment's upcoming alert. Returns true if
+// armed (used for user feedback at cook start).
 async function armServerAlert() {
-  if (!pushEndpoint || !timer) return;
+  if (!timer) return false;
+  const endpoint = await ensurePushEndpoint();
+  if (!endpoint) return false;
   const next = nextAlert();
-  if (!next) return disarmServerAlert();
+  if (!next) {
+    disarmServerAlert();
+    return false;
+  }
   try {
     await api("/api/timer/arm", {
       method: "POST",
       body: JSON.stringify({
-        endpoint: pushEndpoint,
-        fireInSeconds: Math.max(1, next.fireInSeconds + ALERT_GRACE_S),
+        endpoint,
+        fireInSeconds: Math.max(1, next.fireInSeconds),
         title: timer.spec.name,
         body: ACTION_TEXT[next.action] || "Check it!",
       }),
     });
-  } catch {}
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function disarmServerAlert() {
@@ -644,12 +672,6 @@ async function disarmServerAlert() {
   try {
     await api("/api/timer/disarm", { method: "POST", body: JSON.stringify({ endpoint: pushEndpoint }) });
   } catch {}
-}
-
-// Arm when a countdown is actively running; disarm when paused/held/finished.
-function syncServerAlert() {
-  if (!timer || timer.finished || timer.paused || timer.awaiting) disarmServerAlert();
-  else armServerAlert();
 }
 
 // Set the current running segment's length and its wall-clock end (so the
@@ -675,7 +697,13 @@ async function startTimer(spec, entry) {
   renderTimer();
 
   timer.interval = setInterval(tick, 1000);
-  syncServerAlert();
+  // Arm the background push and tell the user whether alerts will reach them.
+  armServerAlert().then((armed) => {
+    if (!timer) return; // stopped already
+    if (armed) toast("Background alerts on for this cook.");
+    else if (pushSupported && Notification.permission !== "granted")
+      toast("Tip: tap the ⋮ menu → Enable Alerts for background notifications.");
+  });
 }
 
 const currentPhase = () => timer.spec.phases[timer.idx];
@@ -751,8 +779,7 @@ function advancePhase() {
     timer.finished = true;
     timer.paused = true;
     renderTimer();
-    syncServerAlert(); // finished → disarm (the in-app "Done!" alarm handled it)
-    return;
+    return; // the armed "Done!" push fires on its own (don't cancel it)
   }
   setSegment(currentPhase().seconds);
   if (["flip", "shake", "toss", "custom", "preheat-done"].includes(action)) {
@@ -760,7 +787,8 @@ function advancePhase() {
     timer.awaiting = action;
   }
   renderTimer();
-  syncServerAlert(); // arm the next real alert, or disarm if now holding
+  // Note: don't arm here. The just-ended segment's push fires on its own; the
+  // next segment is armed when the user resumes (every alert is a hold or final).
 }
 
 // Ring (and flash) repeatedly every 5s until acknowledged — Resume for an
@@ -794,12 +822,17 @@ $("#timer-pause").addEventListener("click", () => {
     timer.paused = false;
     setSegment(timer.remaining); // restart wall-clock for the resumed segment
     stopAlarm();
+    armServerAlert(); // arm the next alert now that we're running again
   } else {
     timer.paused = !timer.paused;
-    if (!timer.paused) setSegment(timer.remaining);
+    if (!timer.paused) {
+      setSegment(timer.remaining);
+      armServerAlert();
+    } else {
+      disarmServerAlert(); // paused → cancel the pending alert
+    }
   }
   renderTimer();
-  syncServerAlert();
 });
 $("#timer-add30").addEventListener("click", () => {
   if (timer.finished) {
@@ -815,7 +848,7 @@ $("#timer-add30").addEventListener("click", () => {
     timer.segmentEndsAt += 30000;
   }
   renderTimer();
-  syncServerAlert(); // re-arm with the extended time
+  armServerAlert(); // re-arm with the extended time
 });
 $("#timer-stop").addEventListener("click", async () => {
   // Confirm only while actively cooking/holding — on the "Done!" screen, Stop
