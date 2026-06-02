@@ -78,6 +78,15 @@ const getSubByEndpoint = db.prepare(
   "SELECT endpoint, p256dh, auth FROM push_subscriptions WHERE endpoint = ?"
 );
 
+// A subscription is "dead" if the push service says it's gone (404/410) or that
+// it was made with a different VAPID key (403, or 400 VapidPkHashMismatch — e.g.
+// after the server's keys were rotated). Either way, prune it so it self-heals.
+function isDeadSub(err) {
+  const code = err.statusCode;
+  if (code === 404 || code === 410 || code === 403) return true;
+  return code === 400 && /VapidPkHashMismatch/i.test((err.body || "").toString());
+}
+
 // Send to a single subscription by endpoint; prune if the push service dropped it.
 async function pushToOne(endpoint, payload) {
   const s = getSubByEndpoint.get(endpoint);
@@ -89,7 +98,7 @@ async function pushToOne(endpoint, payload) {
     );
     return true;
   } catch (err) {
-    if (err.statusCode === 404 || err.statusCode === 410) deleteSub.run(endpoint);
+    if (isDeadSub(err)) deleteSub.run(endpoint);
     return false;
   }
 }
@@ -110,7 +119,7 @@ async function pushToAll(payload) {
         );
         sent++;
       } catch (err) {
-        if (err.statusCode === 404 || err.statusCode === 410) {
+        if (isDeadSub(err)) {
           deleteSub.run(s.endpoint);
           pruned++;
         } else {

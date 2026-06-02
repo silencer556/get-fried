@@ -1156,15 +1156,40 @@ async function subscribePush() {
     const perm = await Notification.requestPermission();
     if (perm !== "granted") throw new Error("Notification permission denied.");
   }
-  const sub =
-    (await swReg.pushManager.getSubscription()) ||
-    (await swReg.pushManager.subscribe({
+  const wantKey = urlBase64ToUint8Array(publicKey);
+  let sub = await swReg.pushManager.getSubscription();
+  // If an existing subscription was created with a DIFFERENT VAPID key (server
+  // keys were rotated), the push service rejects sends with VapidPkHashMismatch.
+  // Drop the stale one — locally and on the server — then subscribe with the
+  // current key. Without this, re-enabling just returns the broken subscription.
+  if (sub && !appServerKeyMatches(sub, wantKey)) {
+    const stale = sub.endpoint;
+    try { await sub.unsubscribe(); } catch {}
+    await api("/api/push/unsubscribe", {
+      method: "POST",
+      body: JSON.stringify({ endpoint: stale }),
+    }).catch(() => {});
+    sub = null;
+  }
+  if (!sub) {
+    sub = await swReg.pushManager.subscribe({
       userVisibleOnly: true,
-      applicationServerKey: urlBase64ToUint8Array(publicKey),
-    }));
+      applicationServerKey: wantKey,
+    });
+  }
   await api("/api/push/subscribe", { method: "POST", body: JSON.stringify(sub.toJSON()) });
   pushEndpoint = sub.endpoint; // enables server-armed timer alerts for this device
   return sub;
+}
+
+// True if the subscription was created with the same VAPID key the server uses now.
+function appServerKeyMatches(sub, wantKey) {
+  const cur = sub.options?.applicationServerKey;
+  if (!cur) return false;
+  const a = new Uint8Array(cur);
+  if (a.length !== wantKey.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== wantKey[i]) return false;
+  return true;
 }
 
 function updateAlertsUI() {
@@ -1183,11 +1208,12 @@ function updateAlertsUI() {
 async function onAlertsClick() {
   const btn = $("#alerts-btn");
   try {
-    if (btn.dataset.state !== "ready") {
-      await subscribePush();
-      updateAlertsUI();
-      toast("Alerts enabled. Sending a test…");
-    }
+    const wasReady = btn.dataset.state === "ready";
+    // Always (re)validate the subscription before testing — this refreshes a
+    // subscription left stale by a VAPID key rotation, even in the "ready" state.
+    await subscribePush();
+    updateAlertsUI();
+    if (!wasReady) toast("Alerts enabled. Sending a test…");
     const r = await api("/api/push/test", { method: "POST" });
     if (r.sent) {
       toast("Test alert sent — check your notifications.");
