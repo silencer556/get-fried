@@ -24,6 +24,25 @@ app.use(express.json({ limit: "2mb" }));
 app.use(cookieParser());
 app.use(attachRole);
 
+// Session cookie config (90-day window). `secure` is intentionally left off for
+// now — behind the Cloudflare tunnel the app sees plain HTTP, so it needs
+// trust-proxy + X-Forwarded-Proto handling first (on the hardening backlog).
+const SESSION_DAYS = 90;
+const sessionCookieOpts = {
+  httpOnly: true,
+  sameSite: "lax",
+  maxAge: 1000 * 60 * 60 * 24 * SESSION_DAYS,
+};
+
+// Sliding session: every authenticated API request renews the 90-day window, so
+// regular users effectively never hit the login screen. Scoped to /api/* (not
+// /api/logout) so Set-Cookie is never attached to cacheable static assets.
+app.use((req, res, next) => {
+  if (req.role && req.path.startsWith("/api/") && req.path !== "/api/logout")
+    res.cookie("afsession", makeCookie(req.role), sessionCookieOpts);
+  next();
+});
+
 // ---- Photo uploads --------------------------------------------------------
 const storage = multer.diskStorage({
   destination: (_req, _file, cb) => cb(null, UPLOADS_DIR),
@@ -45,11 +64,7 @@ app.use("/uploads", express.static(UPLOADS_DIR, { maxAge: "7d" }));
 app.post("/api/login", (req, res) => {
   const role = roleForPassword(req.body?.password);
   if (!role) return res.status(401).json({ error: "Wrong password." });
-  res.cookie("afsession", makeCookie(role), {
-    httpOnly: true,
-    sameSite: "lax",
-    maxAge: 1000 * 60 * 60 * 24 * 30, // 30 days
-  });
+  res.cookie("afsession", makeCookie(role), sessionCookieOpts);
   res.json({ role });
 });
 
