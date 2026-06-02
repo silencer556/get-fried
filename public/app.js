@@ -115,14 +115,26 @@ $("#logout-btn").addEventListener("click", async () => {
 });
 
 // ---- Backup: export / import ----------------------------------------------
-$("#export-btn").addEventListener("click", () => {
+const dataModal = $("#data-modal");
+const hideDataModal = () => dataModal.classList.add("hidden");
+
+$("#data-btn").addEventListener("click", () => {
   closeAllMenus();
+  dataModal.classList.remove("hidden");
+});
+$("#data-cancel").addEventListener("click", hideDataModal);
+dataModal.addEventListener("click", (e) => {
+  if (e.target === dataModal) hideDataModal(); // tap backdrop to dismiss
+});
+
+$("#data-export").addEventListener("click", () => {
+  hideDataModal();
   // Same-origin GET sends the auth cookie; Content-Disposition triggers download.
   window.location.href = "/api/export";
 });
 
-$("#import-btn").addEventListener("click", () => {
-  closeAllMenus();
+$("#data-import").addEventListener("click", () => {
+  hideDataModal();
   $("#import-file").value = ""; // allow re-picking the same file
   $("#import-file").click();
 });
@@ -1164,7 +1176,7 @@ function updateAlertsUI() {
   }
   btn.classList.remove("hidden");
   const granted = Notification.permission === "granted";
-  btn.textContent = granted ? "Test Alert" : "Enable Alerts";
+  btn.textContent = granted ? "Enable Notifications" : "Enable Alerts";
   btn.dataset.state = granted ? "ready" : "enable";
 }
 

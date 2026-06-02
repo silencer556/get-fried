@@ -30,8 +30,7 @@
           <button id="header-kebab" class="ghost kebab" aria-label="Menu" title="Menu">⋮</button>
           <div id="header-menu" class="menu menu-down hidden">
             <button id="alerts-btn">Enable Alerts</button>
-            <button id="export-btn" class="editor-only hidden">Export data</button>
-            <button id="import-btn" class="editor-only hidden">Import data</button>
+            <button id="data-btn" class="editor-only hidden">Data Export/Import</button>
             <button id="logout-btn">Sign out</button>
           </div>
         </div>
@@ -156,6 +155,19 @@
       <div class="modal-actions">
         <button id="confirm-cancel" class="ghost">Cancel</button>
         <button id="confirm-ok" class="primary">OK</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Data export / import chooser -->
+  <div id="data-modal" class="modal hidden">
+    <div class="card confirm-card">
+      <h2>Data Export / Import</h2>
+      <p class="muted small">Export downloads a JSON backup of every entry (photos not included). Import adds entries from a backup file — entries you already have are skipped.</p>
+      <div class="modal-actions">
+        <button id="data-cancel" class="ghost">Cancel</button>
+        <button id="data-import" class="primary">Import</button>
+        <button id="data-export" class="primary">Export</button>
       </div>
     </div>
   </div>
