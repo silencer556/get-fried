@@ -118,7 +118,7 @@ async function showApp() {
   $("#app").classList.remove("hidden");
   if (state.role === "editor") $("#add-btn").classList.remove("hidden");
   updateAlertsUI();
-  restoreActiveCook(); // re-attach to a cook left running when the app was closed
+  restoreActiveCooks(); // re-attach to cooks left running when the app was closed
   state.appliances = await api("/api/appliances");
   await loadFilters();
   await loadEntries();
@@ -476,6 +476,10 @@ function flagPill(label, on, detail) {
   return `<span class="ps-flag ${on ? "on" : "off"}">${text}</span>`;
 }
 
+// Inline SVG arrow — drawn, not a font glyph, so it aligns identically on every
+// platform (the → character sits low in Android's default font).
+const ARROW = `<svg class="arr" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 8h10M9.5 4.5 13 8l-3.5 3.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+
 // Step-by-step lines, aligned 1:1 with the timer's phases (preheat first, if any).
 function breakdownItems(entry) {
   const items = [];
@@ -491,9 +495,9 @@ function breakdownItems(entry) {
     let act = "";
     if (["flip", "shake", "toss", "custom"].includes(s.end_action)) {
       const word = s.end_action === "custom" ? s.action_note || "Check it" : ACTION_TEXT[s.end_action];
-      act = ` <span class="arr">→</span> <b>${esc(word)}</b>`;
+      act = ` ${ARROW} <b>${esc(word)}</b>`;
     } else if (i === steps.length - 1) {
-      act = ` <span class="arr">→</span> <b>Done</b>`;
+      act = ` ${ARROW} <b>Done</b>`;
     }
     items.push(`Cook <b>${fmt(s.duration_seconds)}</b>${temp}${act}`);
   });
@@ -625,40 +629,59 @@ async function ensurePushEndpoint() {
   return pushEndpoint;
 }
 
-// From the current phase, sum time until the next end that actually alerts —
-// skipping seamless "next" transitions (e.g. a mid-cook temp bump). Returns the
-// seconds-from-now and the action, or null if nothing left alerts.
-function nextAlert() {
-  if (!timer) return null;
-  let i = timer.idx;
-  let secs = timer.remaining;
-  while (i < timer.spec.phases.length) {
-    const action = timer.spec.phases[i].action;
+// ---- multiple concurrent cooks --------------------------------------------
+// `timers` holds every live cook (e.g. two air fryers going). `timer` is the
+// one currently shown in the full overlay (or null when all are minimized).
+// Each cook has a unique id; pushes and persisted state are keyed by that id.
+let timers = [];
+const MAX_COOKS = 3;
+let tickInterval = null;
+
+function ensureTickLoop() {
+  if (!tickInterval) tickInterval = setInterval(() => timers.slice().forEach(tickOne), 1000);
+}
+function stopTickLoopIfIdle() {
+  if (!timers.length && tickInterval) {
+    clearInterval(tickInterval);
+    tickInterval = null;
+  }
+}
+async function resumeAudio() {
+  audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+  try { if (audioCtx.state === "suspended") await audioCtx.resume(); } catch {}
+}
+
+// From a cook's current phase, sum time until the next end that actually alerts —
+// skipping seamless "next" transitions. Returns seconds-from-now + action, or null.
+function nextAlert(t) {
+  let i = t.idx;
+  let secs = t.remaining;
+  while (i < t.spec.phases.length) {
+    const action = t.spec.phases[i].action;
     if (action !== "next") return { fireInSeconds: secs, action };
     i += 1;
-    if (i < timer.spec.phases.length) secs += timer.spec.phases[i].seconds;
+    if (i < t.spec.phases.length) secs += t.spec.phases[i].seconds;
   }
   return null;
 }
 
-// Arm the server push for the current segment's upcoming alert. Returns true if
-// armed (used for user feedback at cook start).
-async function armServerAlert() {
-  if (!timer) return false;
+// Arm the server push for this cook's upcoming alert. Returns true if armed.
+async function armServerAlert(t) {
   const endpoint = await ensurePushEndpoint();
   if (!endpoint) return false;
-  const next = nextAlert();
+  const next = nextAlert(t);
   if (!next) {
-    disarmServerAlert();
+    disarmServerAlert(t);
     return false;
   }
   try {
     await api("/api/timer/arm", {
       method: "POST",
       body: JSON.stringify({
+        cookId: t.id,
         endpoint,
         fireInSeconds: Math.max(1, next.fireInSeconds),
-        title: timer.spec.name,
+        title: t.spec.name,
         body: ACTION_TEXT[next.action] || "Check it!",
       }),
     });
@@ -668,49 +691,70 @@ async function armServerAlert() {
   }
 }
 
-async function disarmServerAlert() {
-  if (!pushEndpoint) return;
+async function disarmServerAlert(t) {
   try {
-    await api("/api/timer/disarm", { method: "POST", body: JSON.stringify({ endpoint: pushEndpoint }) });
+    await api("/api/timer/disarm", { method: "POST", body: JSON.stringify({ cookId: t.id }) });
   } catch {}
 }
 
-// Set the current running segment's length and its wall-clock end (so the
-// countdown stays accurate across backgrounding/throttling).
-function setSegment(seconds) {
-  timer.remaining = seconds;
-  timer.segmentEndsAt = Date.now() + seconds * 1000;
+// Set a cook's running segment length + wall-clock end (accurate across backgrounding).
+function setSegment(t, seconds) {
+  t.remaining = seconds;
+  t.segmentEndsAt = Date.now() + seconds * 1000;
 }
 
-// ---- minimize / floating pill ---------------------------------------------
-function minimizeTimer() {
-  if (!timer) return;
-  timer.minimized = true;
-  $("#timer").classList.add("hidden");
-  $("#cook-pill").classList.remove("hidden");
-  updatePill();
+// ---- floating pills (one per minimized cook) ------------------------------
+function pillLabel(t) {
+  if (t.finished) return "Done!";
+  if (t.awaiting) return ACTION_TEXT[t.awaiting] || "Check it!";
+  if (t.paused) return "Paused";
+  return fmt(t.remaining);
 }
-async function reopenTimer() {
-  if (!timer) return;
-  timer.minimized = false;
-  $("#cook-pill").classList.add("hidden");
+function updatePill(t) {
+  const el = document.querySelector(`#cook-pills [data-cook-id="${t.id}"]`);
+  if (!el) return;
+  el.innerHTML = `<span class="pill-name">${esc(t.spec.name)}</span> <span class="pill-clock">${esc(pillLabel(t))}</span>`;
+  el.classList.toggle("alerting", !!(t.awaiting || t.finished || t.alarming));
+}
+// Sync the pill row to `timers` (the open cook shows in the overlay, not as a pill).
+function renderPills() {
+  const container = $("#cook-pills");
+  const visible = timers.filter((t) => t !== timer);
+  const ids = new Set(visible.map((t) => t.id));
+  [...container.children].forEach((el) => { if (!ids.has(el.dataset.cookId)) el.remove(); });
+  visible.forEach((t) => {
+    let el = container.querySelector(`[data-cook-id="${t.id}"]`);
+    if (!el) {
+      el = document.createElement("button");
+      el.className = "cook-pill";
+      el.dataset.cookId = t.id;
+      el.addEventListener("click", () => openCook(t.id));
+      container.appendChild(el);
+    }
+    updatePill(t);
+  });
+  container.classList.toggle("hidden", visible.length === 0);
+}
+// Show a cook in the full-screen overlay.
+function openCook(id) {
+  const t = timers.find((x) => x.id === id);
+  if (!t) return;
+  timer = t;
+  $("#timer-name").textContent = t.spec.name;
+  $("#timer-steps").innerHTML = t.stepsHtml || "";
+  $("#timer").classList.toggle("alerting", !!t.alarming);
   $("#timer").classList.remove("hidden");
-  try { if (audioCtx?.state === "suspended") await audioCtx.resume(); } catch {}
-  renderTimer();
+  resumeAudio();
+  renderPills();
+  renderTimer(t);
 }
-function hidePill() {
-  $("#cook-pill").classList.add("hidden");
-}
-function updatePill() {
-  if (!timer || !timer.minimized) return;
-  let label;
-  if (timer.finished) label = "Done!";
-  else if (timer.awaiting) label = ACTION_TEXT[timer.awaiting] || "Check it!";
-  else if (timer.paused) label = "Paused";
-  else label = fmt(timer.remaining);
-  $("#cook-pill").innerHTML =
-    `<span class="pill-name">${esc(timer.spec.name)}</span> <span class="pill-clock">${esc(label)}</span>`;
-  $("#cook-pill").classList.toggle("alerting", !!(timer.awaiting || timer.finished));
+// Collapse the open cook back to a pill.
+function minimizeActive() {
+  if (!timer) return;
+  $("#timer").classList.add("hidden");
+  $("#timer").classList.remove("alerting");
+  timer = null;
+  renderPills();
 }
 
 // ---- active-cook persistence (survive close / restart) --------------------
@@ -723,117 +767,117 @@ function deviceId() {
   return id;
 }
 
-function cookState() {
-  if (!timer) return null;
+function cookState(t) {
   return {
     deviceId: deviceId(),
-    entryId: timer.spec.id,
-    name: timer.spec.name,
-    phases: timer.spec.phases,
-    stepsHtml: $("#timer-steps").innerHTML,
-    idx: timer.idx,
-    paused: timer.paused,
-    awaiting: timer.awaiting,
-    finished: timer.finished,
-    segmentEndsAt: timer.segmentEndsAt || null,
-    remaining: timer.remaining,
+    cookId: t.id,
+    entryId: t.spec.id,
+    name: t.spec.name,
+    phases: t.spec.phases,
+    stepsHtml: t.stepsHtml,
+    idx: t.idx,
+    paused: t.paused,
+    awaiting: t.awaiting,
+    finished: t.finished,
+    segmentEndsAt: t.segmentEndsAt || null,
+    remaining: t.remaining,
     savedAt: Date.now(),
   };
 }
-async function persistCook() {
-  const s = cookState();
-  if (!s) return;
-  try { await api("/api/cook/state", { method: "PUT", body: JSON.stringify(s) }); } catch {}
+async function persistCook(t) {
+  try { await api("/api/cook/state", { method: "PUT", body: JSON.stringify(cookState(t)) }); } catch {}
 }
-async function clearCook() {
-  try {
-    await api("/api/cook/state?deviceId=" + encodeURIComponent(deviceId()), { method: "DELETE" });
-  } catch {}
+async function deleteCookState(id) {
+  try { await api("/api/cook/state?cookId=" + encodeURIComponent(id), { method: "DELETE" }); } catch {}
 }
 
-// On load, re-attach to a cook that was running when the app was closed/restarted.
-async function restoreActiveCook() {
-  if (timer) return;
-  let s;
-  try { s = await api("/api/cook/state?deviceId=" + encodeURIComponent(deviceId())); } catch { return; }
-  if (!s || !s.phases) return;
-  // Drop cooks older than 6h (clearly abandoned).
-  if (s.savedAt && Date.now() - s.savedAt > 6 * 3600 * 1000) { clearCook(); return; }
-
-  timer = {
-    spec: { id: s.entryId, name: s.name, phases: s.phases },
-    idx: s.idx, paused: s.paused, awaiting: s.awaiting, finished: s.finished,
-    wakeLock: null, minimized: true,
-  };
-  if (!s.finished && !s.paused && !s.awaiting && s.segmentEndsAt) {
-    timer.segmentEndsAt = s.segmentEndsAt;
-    timer.remaining = Math.max(0, Math.ceil((s.segmentEndsAt - Date.now()) / 1000));
-  } else {
-    timer.remaining = s.remaining || 0;
-    timer.segmentEndsAt = Date.now() + (s.remaining || 0) * 1000;
+// On load, re-attach to ALL cooks that were running when the app closed/restarted.
+async function restoreActiveCooks() {
+  if (timers.length) return;
+  let list;
+  try { list = await api("/api/cook/state?deviceId=" + encodeURIComponent(deviceId())); } catch { return; }
+  if (!Array.isArray(list)) return;
+  for (const s of list) {
+    if (!s.phases) continue;
+    if (s.savedAt && Date.now() - s.savedAt > 6 * 3600 * 1000) { deleteCookState(s.cookId); continue; }
+    const t = {
+      id: s.cookId,
+      spec: { id: s.entryId, name: s.name, phases: s.phases },
+      idx: s.idx, paused: s.paused, awaiting: s.awaiting, finished: s.finished,
+      wakeLock: null, stepsHtml: s.stepsHtml || "",
+    };
+    if (!s.finished && !s.paused && !s.awaiting && s.segmentEndsAt) {
+      t.segmentEndsAt = s.segmentEndsAt;
+      t.remaining = Math.max(0, Math.ceil((s.segmentEndsAt - Date.now()) / 1000));
+    } else {
+      t.remaining = s.remaining || 0;
+      t.segmentEndsAt = Date.now() + (s.remaining || 0) * 1000;
+    }
+    timers.push(t);
   }
-  $("#timer-name").textContent = s.name;
-  $("#timer-steps").innerHTML = s.stepsHtml || "";
-  timer.interval = setInterval(tick, 1000);
-  $("#cook-pill").classList.remove("hidden"); // restore minimized (non-intrusive)
-  renderTimer();
-  if (!timer.paused && !timer.finished) tick(); // reconcile time elapsed while away
+  if (!timers.length) return;
+  ensureTickLoop();
+  renderPills(); // restore as pills (non-intrusive; nothing auto-opens)
+  timers.slice().forEach((t) => { if (!t.paused && !t.finished) tickOne(t); }); // reconcile elapsed time
 }
 
 async function startTimer(spec, entry) {
-  if (timer) { clearInterval(timer.interval); stopAlarm(); } // replace any running cook
-  hidePill();
-  audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
-  if (audioCtx.state === "suspended") await audioCtx.resume();
+  if (timers.length >= MAX_COOKS) {
+    toast(`You can run up to ${MAX_COOKS} cooks at once — stop one first.`);
+    return;
+  }
+  await resumeAudio();
   let wakeLock = null;
   try { wakeLock = await navigator.wakeLock?.request("screen"); } catch {}
 
-  timer = { spec, idx: 0, remaining: spec.phases[0]?.seconds || 0, paused: false, awaiting: null, finished: false, wakeLock };
-  setSegment(timer.remaining);
-  $("#timer-steps").innerHTML = entry
-    ? breakdownItems(entry).map((h, i) => `<li data-phase="${i}">${h}</li>`).join("")
-    : "";
-  $("#timer-name").textContent = spec.name;
-  $("#timer").classList.remove("hidden");
-  renderTimer();
-
-  timer.interval = setInterval(tick, 1000);
-  persistCook();
-  // Arm the background push. Only speak up if alerts AREN'T set up (a useful nudge).
-  armServerAlert().then((armed) => {
-    if (!timer) return; // stopped already
+  const t = {
+    id: crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(36).slice(2),
+    spec, idx: 0, paused: false, awaiting: null, finished: false, alarming: false, wakeLock,
+    stepsHtml: entry
+      ? breakdownItems(entry).map((h, i) => `<li data-phase="${i}">${h}</li>`).join("")
+      : "",
+  };
+  setSegment(t, spec.phases[0]?.seconds || 0);
+  timers.push(t);
+  ensureTickLoop();
+  openCook(t.id); // show the new cook
+  persistCook(t);
+  armServerAlert(t).then((armed) => {
+    if (!timers.includes(t)) return; // stopped already
     if (!armed && pushSupported && Notification.permission !== "granted")
       toast("Tip: tap the ⋮ menu → Enable Alerts for background notifications.");
   });
 }
 
-$("#timer-min").addEventListener("click", minimizeTimer);
-$("#cook-pill").addEventListener("click", reopenTimer);
+$("#timer-min").addEventListener("click", minimizeActive);
 
-const currentPhase = () => timer.spec.phases[timer.idx];
+const currentPhase = (t) => t.spec.phases[t.idx];
 
 // "Step 2 of 3" across the cooking phases (preheat excluded).
-function stepProgress() {
-  const cook = timer.spec.phases.filter((ph) => ph.label === "Cooking");
-  const cur = currentPhase();
+function stepProgress(t) {
+  const cook = t.spec.phases.filter((ph) => ph.label === "Cooking");
+  const cur = currentPhase(t);
   if (cur?.label === "Preheating") return "Preheating";
   const n = cook.indexOf(cur) + 1;
   return cook.length > 1 ? `Step ${n} of ${cook.length}` : "";
 }
 
-// Orange-highlight the step the timer is currently on (none once finished).
-function highlightStep() {
+// Orange-highlight the step the open cook is currently on (none once finished).
+function highlightStep(t) {
   document.querySelectorAll("#timer-steps li").forEach((li) =>
-    li.classList.toggle("current", !timer.finished && Number(li.dataset.phase) === timer.idx)
+    li.classList.toggle("current", !t.finished && Number(li.dataset.phase) === t.idx)
   );
 }
 
-function renderTimer() {
-  highlightStep();
-  updatePill();
+// Update a cook's pill always; update the overlay only when it's the open cook.
+function renderTimer(t) {
+  updatePill(t);
+  if (t !== timer) return;
+
+  highlightStep(t);
   const pauseBtn = $("#timer-pause");
 
-  if (timer.finished) {
+  if (t.finished) {
     $("#timer-stage").textContent = "Done!";
     $("#timer-clock").textContent = "0:00";
     $("#timer-next").textContent = "Take it out 🎉";
@@ -841,175 +885,176 @@ function renderTimer() {
     return;
   }
 
-  // Held at a flip/shake/toss/preheat boundary: the instruction shows ONLY here,
-  // and the countdown waits until the user taps Resume.
-  if (timer.awaiting) {
-    $("#timer-stage").textContent = ACTION_TEXT[timer.awaiting] || "Check it!";
-    $("#timer-clock").textContent = fmt(timer.remaining);
+  // Held at a flip/shake/toss/preheat boundary: instruction shows here, countdown waits.
+  if (t.awaiting) {
+    $("#timer-stage").textContent = ACTION_TEXT[t.awaiting] || "Check it!";
+    $("#timer-clock").textContent = fmt(t.remaining);
     $("#timer-next").textContent =
-      timer.awaiting === "preheat-done"
-        ? "Add food, then tap Resume"
-        : "Tap Resume when you're done";
+      t.awaiting === "preheat-done" ? "Add food, then tap Resume" : "Tap Resume when you're done";
     pauseBtn.textContent = "Resume";
     pauseBtn.classList.remove("hidden");
     return;
   }
 
-  const p = currentPhase();
+  const p = currentPhase(t);
   $("#timer-stage").textContent = p?.label || "Cooking";
-  $("#timer-clock").textContent = fmt(timer.remaining);
-  $("#timer-next").textContent = stepProgress();
-  pauseBtn.textContent = timer.paused ? "Resume" : "Pause";
+  $("#timer-clock").textContent = fmt(t.remaining);
+  $("#timer-next").textContent = stepProgress(t);
+  pauseBtn.textContent = t.paused ? "Resume" : "Pause";
   pauseBtn.classList.remove("hidden");
 }
 
-function tick() {
-  if (timer.paused || timer.finished) return;
+function tickOne(t) {
+  if (t.paused || t.finished) return;
   // Wall-clock based so a backgrounded/throttled tab stays accurate on return.
-  timer.remaining = Math.ceil((timer.segmentEndsAt - Date.now()) / 1000);
-  if (timer.remaining <= 0) {
-    timer.remaining = 0;
-    advancePhase();
-  } else renderTimer();
+  t.remaining = Math.ceil((t.segmentEndsAt - Date.now()) / 1000);
+  if (t.remaining <= 0) {
+    t.remaining = 0;
+    advancePhase(t);
+  } else renderTimer(t);
 }
 
-// Fire the end-of-phase alert, then advance. Interactive actions
-// (flip/shake/toss/custom/preheat) HOLD the countdown until the user resumes —
-// so "Shake it!" appears at the transition, never during the step.
-function advancePhase() {
-  const action = currentPhase().action;
-  startAlarm(action);
-  // Interactive holds (flip/shake/toss/custom/preheat): STAY on the current step
-  // until the user resumes — so the step highlight doesn't jump ahead and +30
-  // re-cooks THIS step, not the next one. idx advances on Resume.
+// Fire the end-of-phase alert, then advance. Interactive actions hold until Resume.
+function advancePhase(t) {
+  const action = currentPhase(t).action;
+  startAlarm(t, action);
   if (["flip", "shake", "toss", "custom", "preheat-done"].includes(action)) {
-    timer.paused = true;
-    timer.awaiting = action;
-    timer.remaining = 0;
-    renderTimer();
-    persistCook();
+    t.paused = true;
+    t.awaiting = action;
+    t.remaining = 0;
+    renderTimer(t);
+    persistCook(t);
     return;
   }
   // Seamless ("next") or final ("done"): advance immediately.
-  timer.idx += 1;
-  if (timer.idx >= timer.spec.phases.length) {
-    timer.finished = true;
-    timer.paused = true;
-    renderTimer();
-    persistCook();
-    return; // the armed "Done!" push fires on its own (don't cancel it)
+  t.idx += 1;
+  if (t.idx >= t.spec.phases.length) {
+    t.finished = true;
+    t.paused = true;
+    renderTimer(t);
+    persistCook(t);
+    return; // the armed "Done!" push fires on its own
   }
-  setSegment(currentPhase().seconds);
-  renderTimer();
-  persistCook();
+  setSegment(t, currentPhase(t).seconds);
+  renderTimer(t);
+  persistCook(t);
 }
 
-// Ring (and flash) repeatedly every 5s until acknowledged — Resume for an
-// interactive hold, Stop for the final "Done" alarm.
+// Ring (and flash) repeatedly every 5s until acknowledged.
 const ALARM_INTERVAL_MS = 5000;
 
-function startAlarm(action) {
-  if (action === "next") return; // seamless step change (e.g. temp bump), no alert
-  stopAlarm();
-  $("#timer").classList.add("alerting");
+function startAlarm(t, action) {
+  if (action === "next") return; // seamless step change, no alert
+  stopAlarm(t);
+  t.alarming = true;
+  if (t === timer) $("#timer").classList.add("alerting");
   const ring =
     action === "done"
       ? () => { beep(4, 660, 0.3); vibrate([300, 150, 300, 150, 500]); }
       : () => { beep(2, 990); vibrate([200, 100, 200]); };
   ring(); // fire immediately, then repeat
-  timer.alarmInterval = setInterval(ring, ALARM_INTERVAL_MS);
+  t.alarmInterval = setInterval(ring, ALARM_INTERVAL_MS);
+  updatePill(t);
 }
 
-function stopAlarm() {
-  if (timer?.alarmInterval) {
-    clearInterval(timer.alarmInterval);
-    timer.alarmInterval = null;
+function stopAlarm(t) {
+  if (t?.alarmInterval) {
+    clearInterval(t.alarmInterval);
+    t.alarmInterval = null;
   }
-  $("#timer").classList.remove("alerting");
+  if (t) t.alarming = false;
+  if (t === timer) $("#timer").classList.remove("alerting");
 }
 
 $("#timer-pause").addEventListener("click", () => {
-  if (timer.finished) return;
-  if (timer.awaiting) {
+  const t = timer;
+  if (!t || t.finished) return;
+  if (t.awaiting) {
     // Acknowledge the hold and NOW advance to the next step.
-    timer.awaiting = null;
-    timer.paused = false;
-    stopAlarm();
-    timer.idx += 1;
-    if (timer.idx >= timer.spec.phases.length) {
-      timer.finished = true;
-      timer.paused = true;
-      renderTimer();
+    t.awaiting = null;
+    t.paused = false;
+    stopAlarm(t);
+    t.idx += 1;
+    if (t.idx >= t.spec.phases.length) {
+      t.finished = true;
+      t.paused = true;
+      renderTimer(t);
+      persistCook(t);
       return; // (guard; holds are never the last phase in practice)
     }
-    setSegment(currentPhase().seconds);
-    armServerAlert(); // arm the next alert now that we're running again
+    setSegment(t, currentPhase(t).seconds);
+    armServerAlert(t);
   } else {
-    timer.paused = !timer.paused;
-    if (!timer.paused) {
-      setSegment(timer.remaining);
-      armServerAlert();
+    t.paused = !t.paused;
+    if (!t.paused) {
+      setSegment(t, t.remaining);
+      armServerAlert(t);
     } else {
-      disarmServerAlert(); // paused → cancel the pending alert
+      disarmServerAlert(t);
     }
   }
-  renderTimer();
-  persistCook();
+  renderTimer(t);
+  persistCook(t);
 });
+
 $("#timer-add30").addEventListener("click", () => {
-  if (timer.finished) {
-    // Restart the final step for 30 more seconds (keeps cooking past "Done!").
-    timer.finished = false;
-    timer.paused = false;
-    timer.awaiting = null;
-    timer.idx = timer.spec.phases.length - 1;
-    stopAlarm();
-    setSegment(30);
-  } else if (timer.awaiting) {
-    // "This step needs a bit more" — re-cook the CURRENT step for 30s; it'll
-    // re-alert (flip/shake/etc) again when those 30s are up.
-    timer.awaiting = null;
-    timer.paused = false;
-    stopAlarm();
-    setSegment(30);
+  const t = timer;
+  if (!t) return;
+  if (t.finished) {
+    t.finished = false;
+    t.paused = false;
+    t.awaiting = null;
+    t.idx = t.spec.phases.length - 1;
+    stopAlarm(t);
+    setSegment(t, 30);
+  } else if (t.awaiting) {
+    // re-cook the CURRENT step for 30s; it'll re-alert when those 30s are up
+    t.awaiting = null;
+    t.paused = false;
+    stopAlarm(t);
+    setSegment(t, 30);
   } else {
-    timer.remaining += 30;
-    timer.segmentEndsAt += 30000;
+    t.remaining += 30;
+    t.segmentEndsAt += 30000;
   }
-  renderTimer();
-  armServerAlert(); // re-arm with the extended time
-  persistCook();
+  renderTimer(t);
+  armServerAlert(t);
+  persistCook(t);
 });
+
 $("#timer-stop").addEventListener("click", async () => {
-  // Confirm only while actively cooking/holding — on the "Done!" screen, Stop
-  // just dismisses (and silences the done alarm), so no prompt needed there.
-  if (timer && !timer.finished) {
-    const ok = await confirmDialog("Stop the timer? This resets all steps and timers.", {
+  const t = timer;
+  if (!t) return;
+  if (!t.finished) {
+    const ok = await confirmDialog("Stop this timer? This resets its steps and timers.", {
       okLabel: "Stop timer",
       danger: true,
     });
     if (!ok) return;
   }
-  if (timer) stopTimer();
+  stopCook(t);
 });
 
-async function stopTimer() {
-  clearInterval(timer.interval);
-  stopAlarm();
-  disarmServerAlert(); // cancel any pending background push
-  clearCook(); // remove the persisted active cook
-  try { await timer.wakeLock?.release(); } catch {}
-  $("#timer").classList.add("hidden");
-  hidePill();
-  // Stamp "last cooked" for the entry we just finished.
-  if (timer.spec.id) api("/api/entries/" + timer.spec.id + "/cooked", { method: "POST" }).then(loadEntries).catch(() => {});
-  timer = null;
+async function stopCook(t) {
+  stopAlarm(t);
+  disarmServerAlert(t);
+  deleteCookState(t.id);
+  try { await t.wakeLock?.release(); } catch {}
+  timers = timers.filter((x) => x !== t);
+  if (t === timer) {
+    timer = null;
+    $("#timer").classList.add("hidden");
+    $("#timer").classList.remove("alerting");
+  }
+  if (t.spec.id) api("/api/entries/" + t.spec.id + "/cooked", { method: "POST" }).then(loadEntries).catch(() => {});
+  renderPills();
+  stopTickLoopIfIdle();
 }
 
-// Returning to a backgrounded app: recompute the countdown immediately so the
-// display reflects reality (and advances/finishes if time elapsed while away).
+// Returning to a backgrounded app: recompute every running cook immediately.
 document.addEventListener("visibilitychange", () => {
-  if (!document.hidden && timer && !timer.paused && !timer.finished) tick();
+  if (document.hidden) return;
+  timers.slice().forEach((t) => { if (!t.paused && !t.finished) tickOne(t); });
 });
 
 // ---- Push notifications ---------------------------------------------------

@@ -320,8 +320,15 @@ legend { padding: 0 0.4rem; color: var(--muted); }
 }
 .ps-steps li { line-height: 1.4; }
 .ps-steps b { color: var(--text); }
-/* Keep the → vertically centered with the text (it sits low on some mobile fonts). */
-.arr { display: inline-block; vertical-align: middle; line-height: 1; }
+/* Drawn arrow (inline SVG) — renders identically on Android/iOS/desktop, unlike
+   the → glyph which sits low in some mobile fonts. Sized to the text, centered. */
+.arr {
+  width: 0.85em;
+  height: 0.85em;
+  vertical-align: -0.05em;
+  flex: none;
+  color: var(--muted);
+}
 
 /* Timer */
 .timer-overlay {
@@ -379,13 +386,19 @@ legend { padding: 0 0.4rem; color: var(--muted); }
   50% { background: var(--accent); }
 }
 
-/* Floating active-cook pill (timer minimized) */
-.cook-pill {
+/* Floating active-cook pills (one per minimized cook) */
+.cook-pills {
   position: fixed;
   left: 50%;
   bottom: 1rem;
   transform: translateX(-50%);
   z-index: 25;
+  display: flex;
+  flex-direction: column-reverse;
+  align-items: center;
+  gap: 0.5rem;
+}
+.cook-pill {
   display: flex;
   align-items: center;
   gap: 0.6rem;

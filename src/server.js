@@ -165,73 +165,85 @@ app.post("/api/push/test", requireUser, async (req, res) => {
 // and disarms it when the segment ends in the foreground. If the app is
 // backgrounded/closed the disarm never comes, so this fires the alert. In-memory
 // only: a server restart drops pending alerts (rare; the user can re-run).
-const armedAlerts = new Map(); // endpoint -> setTimeout handle
+const armedAlerts = new Map(); // cookId -> setTimeout handle
 const MAX_ARM_SECONDS = 6 * 60 * 60;
 
-function clearArmed(endpoint) {
-  const h = armedAlerts.get(endpoint);
+function clearArmed(cookId) {
+  const h = armedAlerts.get(cookId);
   if (h) {
     clearTimeout(h);
-    armedAlerts.delete(endpoint);
+    armedAlerts.delete(cookId);
   }
 }
 
 app.post("/api/timer/arm", requireUser, (req, res) => {
-  const { endpoint, fireInSeconds, title, body } = req.body || {};
+  const { cookId, endpoint, fireInSeconds, title, body } = req.body || {};
   if (!pushEnabled) return res.status(503).json({ error: "Push not configured." });
-  if (!endpoint || !(Number(fireInSeconds) > 0))
+  if (!cookId || !endpoint || !(Number(fireInSeconds) > 0))
     return res.status(400).json({ error: "Bad arm request." });
   const secs = Math.min(Number(fireInSeconds), MAX_ARM_SECONDS);
-  clearArmed(endpoint);
-  const tail = endpoint.slice(-12);
-  console.log(`[timer] armed ${tail} in ${secs}s — "${body}"`);
+  clearArmed(cookId);
+  const tag = cookId.slice(0, 8);
+  console.log(`[timer] armed ${tag} in ${secs}s — "${body}"`);
   const handle = setTimeout(async () => {
-    armedAlerts.delete(endpoint);
+    armedAlerts.delete(cookId);
     const ok = await pushToOne(
       endpoint,
       JSON.stringify({
         title: title || "Get Fried",
         body: body || "Timer",
-        tag: "getfried-timer-" + Date.now(),
+        tag: "getfried-timer-" + cookId,
       })
     );
-    console.log(`[timer] fired ${tail} — "${body}" — delivered=${ok}`);
+    console.log(`[timer] fired ${tag} — "${body}" — delivered=${ok}`);
   }, secs * 1000);
   handle.unref?.();
-  armedAlerts.set(endpoint, handle);
+  armedAlerts.set(cookId, handle);
   res.json({ ok: true, fireInSeconds: secs });
 });
 
 app.post("/api/timer/disarm", requireUser, (req, res) => {
-  if (req.body?.endpoint) {
-    clearArmed(req.body.endpoint);
-    console.log(`[timer] disarmed ${req.body.endpoint.slice(-12)}`);
+  if (req.body?.cookId) {
+    clearArmed(req.body.cookId);
+    console.log(`[timer] disarmed ${req.body.cookId.slice(0, 8)}`);
   }
   res.json({ ok: true });
 });
 
 // ---- Active cook persistence (survive app close / phone restart) ----------
+// Keyed by cookId so multiple concurrent cooks (e.g. two air fryers) persist.
 const upsertCook = db.prepare(
-  `INSERT INTO active_cooks (device_id, state, updated_at) VALUES (@device_id, @state, datetime('now'))
-   ON CONFLICT(device_id) DO UPDATE SET state = excluded.state, updated_at = datetime('now')`
+  `INSERT INTO active_cooks (cook_id, device_id, state, updated_at)
+   VALUES (@cook_id, @device_id, @state, datetime('now'))
+   ON CONFLICT(cook_id) DO UPDATE SET state = excluded.state, updated_at = datetime('now')`
 );
-const getCook = db.prepare("SELECT state FROM active_cooks WHERE device_id = ?");
-const delCook = db.prepare("DELETE FROM active_cooks WHERE device_id = ?");
+const getCookById = db.prepare("SELECT state FROM active_cooks WHERE cook_id = ?");
+const getCooksByDevice = db.prepare(
+  "SELECT state FROM active_cooks WHERE device_id = ? ORDER BY updated_at"
+);
+const delCookById = db.prepare("DELETE FROM active_cooks WHERE cook_id = ?");
+const delCooksByDevice = db.prepare("DELETE FROM active_cooks WHERE device_id = ?");
 
 app.put("/api/cook/state", requireUser, (req, res) => {
   const s = req.body;
-  if (!s?.deviceId) return res.status(400).json({ error: "deviceId required" });
-  upsertCook.run({ device_id: s.deviceId, state: JSON.stringify(s) });
+  if (!s?.deviceId || !s?.cookId) return res.status(400).json({ error: "deviceId and cookId required" });
+  upsertCook.run({ cook_id: s.cookId, device_id: s.deviceId, state: JSON.stringify(s) });
   res.json({ ok: true });
 });
 
+// ?cookId=X → that cook (or null); ?deviceId=X → array of all that device's cooks.
 app.get("/api/cook/state", requireUser, (req, res) => {
-  const row = getCook.get(req.query.deviceId || "");
-  res.json(row ? JSON.parse(row.state) : null);
+  if (req.query.cookId) {
+    const row = getCookById.get(req.query.cookId);
+    return res.json(row ? JSON.parse(row.state) : null);
+  }
+  const rows = getCooksByDevice.all(req.query.deviceId || "");
+  res.json(rows.map((r) => JSON.parse(r.state)));
 });
 
 app.delete("/api/cook/state", requireUser, (req, res) => {
-  delCook.run(req.query.deviceId || "");
+  if (req.query.cookId) delCookById.run(req.query.cookId);
+  else if (req.query.deviceId) delCooksByDevice.run(req.query.deviceId);
   res.json({ ok: true });
 });
 

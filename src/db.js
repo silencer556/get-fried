@@ -68,12 +68,6 @@ db.exec(`
     created_at TEXT DEFAULT (datetime('now'))
   );
 
-  -- Active cook per device, so a running timer survives app close / phone restart.
-  CREATE TABLE IF NOT EXISTS active_cooks (
-    device_id  TEXT PRIMARY KEY,
-    state      TEXT NOT NULL,
-    updated_at TEXT DEFAULT (datetime('now'))
-  );
 `);
 
 // ---- Migrations -----------------------------------------------------------
@@ -83,6 +77,20 @@ if (!entryCols.includes("focus_x"))
   db.exec("ALTER TABLE entries ADD COLUMN focus_x REAL DEFAULT 50");
 if (!entryCols.includes("focus_y"))
   db.exec("ALTER TABLE entries ADD COLUMN focus_y REAL DEFAULT 50");
+
+// active_cooks moved from one-per-device (device_id PK) to one-per-cook (cook_id PK)
+// to support multiple concurrent cooks. Drop the old-schema table (transient data).
+const cookCols = db.prepare("PRAGMA table_info(active_cooks)").all().map((c) => c.name);
+if (cookCols.length && !cookCols.includes("cook_id")) db.exec("DROP TABLE active_cooks");
+db.exec(`
+  CREATE TABLE IF NOT EXISTS active_cooks (
+    cook_id    TEXT PRIMARY KEY,
+    device_id  TEXT NOT NULL,
+    state      TEXT NOT NULL,
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_active_cooks_device ON active_cooks (device_id);
+`);
 
 // ---- Seed (only on a fresh database) -------------------------------------
 const entryCount = db.prepare("SELECT COUNT(*) AS n FROM entries").get().n;
