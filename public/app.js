@@ -114,9 +114,59 @@ $("#logout-btn").addEventListener("click", async () => {
   location.reload();
 });
 
+// ---- Backup: export / import ----------------------------------------------
+$("#export-btn").addEventListener("click", () => {
+  closeAllMenus();
+  // Same-origin GET sends the auth cookie; Content-Disposition triggers download.
+  window.location.href = "/api/export";
+});
+
+$("#import-btn").addEventListener("click", () => {
+  closeAllMenus();
+  $("#import-file").value = ""; // allow re-picking the same file
+  $("#import-file").click();
+});
+
+$("#import-file").addEventListener("change", async (ev) => {
+  const file = ev.target.files?.[0];
+  if (!file) return;
+  let data;
+  try {
+    data = JSON.parse(await file.text());
+  } catch {
+    return toast("That file isn't valid JSON.");
+  }
+  const entries = Array.isArray(data) ? data : data.entries;
+  if (!Array.isArray(entries) || !entries.length)
+    return toast("No entries found in that file.");
+  if (
+    !(await confirmDialog(
+      `Import ${entries.length} entr${entries.length === 1 ? "y" : "ies"}? ` +
+        `Entries whose name you already have are skipped. Photos aren't included.`,
+      { okLabel: "Import" }
+    ))
+  )
+    return;
+  try {
+    const r = await api("/api/import", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ entries }),
+    });
+    toast(`Imported ${r.created} • skipped ${r.skipped}.`);
+    await loadFilters();
+    await loadEntries();
+  } catch (err) {
+    toast("Import failed: " + err.message);
+  }
+});
+
 async function showApp() {
   $("#app").classList.remove("hidden");
-  if (state.role === "editor") $("#add-btn").classList.remove("hidden");
+  if (state.role === "editor") {
+    $("#add-btn").classList.remove("hidden");
+    document.querySelectorAll(".editor-only").forEach((el) => el.classList.remove("hidden"));
+  }
   updateAlertsUI();
   restoreActiveCooks(); // re-attach to cooks left running when the app was closed
   state.appliances = await api("/api/appliances");

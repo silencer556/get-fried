@@ -30,10 +30,13 @@
           <button id="header-kebab" class="ghost kebab" aria-label="Menu" title="Menu">⋮</button>
           <div id="header-menu" class="menu menu-down hidden">
             <button id="alerts-btn">Enable Alerts</button>
+            <button id="export-btn" class="editor-only hidden">Export data</button>
+            <button id="import-btn" class="editor-only hidden">Import data</button>
             <button id="logout-btn">Sign out</button>
           </div>
         </div>
       </div>
+      <input id="import-file" type="file" accept="application/json,.json" hidden />
     </header>
 
     <div class="filters">

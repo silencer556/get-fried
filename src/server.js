@@ -473,6 +473,108 @@ app.post("/api/entries/:id/cooked", (req, res) => {
   res.json({ ok: true });
 });
 
+// ---- Backup: export / import (editor only) --------------------------------
+// Portable JSON of every entry (all fields, steps, tags, appliance by name).
+// Photos are intentionally excluded — re-add those by hand after importing.
+app.get("/api/export", requireEditor, (_req, res) => {
+  const rows = db
+    .prepare(
+      `SELECT e.*, a.name AS appliance_name, a.wattage AS appliance_wattage
+       FROM entries e LEFT JOIN appliances a ON a.id = e.appliance_id
+       ORDER BY e.name COLLATE NOCASE`
+    )
+    .all()
+    .map(hydrate);
+  const entries = rows.map((e) => ({
+    name: e.name,
+    brand: e.brand,
+    category: e.category,
+    temp: e.temp,
+    temp_unit: e.temp_unit,
+    preheat: !!e.preheat,
+    preheat_time_seconds: e.preheat_time_seconds,
+    servings_note: e.servings_note,
+    notes: e.notes,
+    rating: e.rating,
+    last_cooked_at: e.last_cooked_at,
+    appliance_name: e.appliance_name,
+    appliance_wattage: e.appliance_wattage,
+    tags: e.tags,
+    steps: e.steps.map((s) => ({
+      duration_seconds: s.duration_seconds,
+      temp_override: s.temp_override,
+      end_action: s.end_action,
+      action_note: s.action_note,
+    })),
+  }));
+  const stamp = new Date().toISOString().slice(0, 10);
+  res.set("Content-Disposition", `attachment; filename="get-fried-backup-${stamp}.json"`);
+  res.json({
+    app: "get-fried",
+    version: 1,
+    exported_at: new Date().toISOString(),
+    count: entries.length,
+    entries,
+  });
+});
+
+// Find an appliance by name (case-sensitive match on the stored name) or create
+// it — IDs aren't portable across deployments, so we key on name + wattage.
+function resolveApplianceId(name, wattage) {
+  const n = String(name || "").trim();
+  if (!n) return null;
+  const found = db.prepare("SELECT id FROM appliances WHERE name = ?").get(n);
+  if (found) return found.id;
+  return db
+    .prepare("INSERT INTO appliances (name, wattage) VALUES (?, ?)")
+    .run(n, wattage != null && wattage !== "" ? Math.round(Number(wattage)) : null)
+    .lastInsertRowid;
+}
+
+app.post("/api/import", requireEditor, (req, res) => {
+  const body = req.body || {};
+  const entries = Array.isArray(body.entries)
+    ? body.entries
+    : Array.isArray(body)
+    ? body
+    : null;
+  if (!entries) return res.status(400).json({ error: "Invalid backup file (no entries)." });
+  const replace = body.replace === true || req.query.replace === "1";
+  const out = db.transaction(() => {
+    if (replace) db.prepare("DELETE FROM entries").run(); // cascades steps + entry_tags
+    // Skip entries whose name already exists (case-insensitive) so re-importing
+    // is safe and doesn't create duplicates.
+    const have = new Set(
+      db.prepare("SELECT lower(name) AS n FROM entries").all().map((r) => r.n)
+    );
+    let created = 0,
+      skipped = 0;
+    for (const raw of entries) {
+      const name = String(raw?.name || "").trim();
+      if (!name || have.has(name.toLowerCase())) {
+        skipped++;
+        continue;
+      }
+      const data = coerce({
+        ...raw,
+        appliance_id: resolveApplianceId(raw.appliance_name, raw.appliance_wattage),
+      });
+      const id = db
+        .prepare(
+          `INSERT INTO entries (${entryFields.join(", ")})
+           VALUES (${entryFields.map((f) => "@" + f).join(", ")})`
+        )
+        .run(data).lastInsertRowid;
+      setSteps(id, raw.steps);
+      setTags(id, raw.tags);
+      have.add(name.toLowerCase());
+      created++;
+    }
+    return { created, skipped };
+  })();
+  res.json({ ok: true, total: entries.length, ...out });
+});
+
 // ---- Static PWA -----------------------------------------------------------
 const PUBLIC_DIR = path.join(__dirname, "..", "public");
 
