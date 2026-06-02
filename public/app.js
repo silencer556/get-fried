@@ -1176,7 +1176,7 @@ function updateAlertsUI() {
   }
   btn.classList.remove("hidden");
   const granted = Notification.permission === "granted";
-  btn.textContent = granted ? "Enable Notifications" : "Enable Alerts";
+  btn.textContent = granted ? "Test Alerts" : "Enable Alerts";
   btn.dataset.state = granted ? "ready" : "enable";
 }
 
