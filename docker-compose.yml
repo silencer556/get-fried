@@ -20,6 +20,28 @@ services:
     volumes:
       - airfry-data:/data   # SQLite DB + uploaded photos
 
+  # Nightly backup of the SQLite DB + uploaded photos to Backblaze B2 (via rclone).
+  # Shares the app's data volume read-only. Leave B2_* unset in .env to disable.
+  backup:
+    build: ./backup
+    container_name: air-fry-backup
+    restart: unless-stopped
+    depends_on:
+      - app
+    environment:
+      B2_BUCKET: ${B2_BUCKET:-}
+      # rclone B2 remote configured entirely via env — no rclone.conf needed.
+      RCLONE_CONFIG_B2_TYPE: b2
+      RCLONE_CONFIG_B2_ACCOUNT: ${B2_KEY_ID:-}
+      RCLONE_CONFIG_B2_KEY: ${B2_APP_KEY:-}
+      # Tuning (all optional):
+      CRON_SCHEDULE: ${BACKUP_SCHEDULE:-0 2 * * *}
+      RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-30}
+      RUN_ON_START: ${BACKUP_RUN_ON_START:-0}
+      TZ: ${TZ:-UTC}
+    volumes:
+      - airfry-data:/data:ro   # read-only: backup never writes to live data
+
   # Optional: uncomment and add your tunnel token to expose over HTTPS.
   # cloudflared:
   #   image: cloudflare/cloudflared:latest

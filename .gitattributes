@@ -1,0 +1,5 @@
+# Shell scripts and Dockerfiles MUST be LF — Alpine/BusyBox can't parse a CRLF
+# shebang, which silently breaks the backup sidecar on a Windows-authored repo.
+*.sh        text eol=lf
+Dockerfile  text eol=lf
+entrypoint.sh text eol=lf

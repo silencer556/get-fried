@@ -100,6 +100,37 @@ Entries/photos survive: `compose restart`, `compose down` + `up`, image rebuilds
 `docker compose down -v` (the `-v` deletes volumes) or deleting the volume manually.
 **Never use `-v`** unless you intend to erase everything.
 
+### Offsite backups (Backblaze B2)
+
+A `backup` sidecar (Alpine + rclone + sqlite, defined in `docker-compose.yml`,
+built from `backup/`) shares the data volume **read-only** and runs nightly via
+BusyBox cron. Each run:
+
+1. Takes a consistent SQLite hot backup (`.backup`, safe under live writes) and
+   uploads it datestamped to `b2:<bucket>/backups/db/get_fried_<YYYY-MM-DD>.db`.
+2. Copies `/data/uploads/` photos to `b2:<bucket>/backups/uploads/`. Filenames are
+   immutable UUIDs, so it's additive/de-duped — only new photos transfer, and photos
+   for older db snapshots stay available for restore.
+3. Prunes db snapshots older than `BACKUP_RETENTION_DAYS` (uploads are kept).
+
+Setup: create a B2 **bucket-scoped** application key (least privilege; bucket names
+are **case-sensitive**), then fill `B2_KEY_ID` / `B2_APP_KEY` / `B2_BUCKET` in `.env`
+(see `.env.example` for optional schedule/retention/TZ tuning) and
+`docker compose up -d --build`. Leave `B2_BUCKET` blank to disable (jobs no-op).
+
+```bash
+# Test it immediately instead of waiting for 2 AM:
+BACKUP_RUN_ON_START=1 docker compose up -d --build backup
+docker compose logs -f backup        # watch the run
+
+# Restore a snapshot locally:
+rclone copyto b2:<bucket>/backups/db/get_fried_<date>.db ./airfry.db
+rclone copy   b2:<bucket>/backups/uploads/ ./uploads/
+```
+
+> Scripts in `backup/` are LF-only (enforced by `.gitattributes`) — a CRLF shebang
+> silently breaks Alpine's shell.
+
 ### Handy ops commands (run on Umbrel with `sudo`)
 
 ```bash

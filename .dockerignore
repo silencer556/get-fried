@@ -4,3 +4,4 @@ data
 .env
 *.log
 npm-debug.log*
+backup
